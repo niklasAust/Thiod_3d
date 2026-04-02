@@ -35,6 +35,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float terrainLength = 128f;
     [SerializeField] private float terrainHeight = 30f;
     [SerializeField] private int terrainGridSize = 16;
+    [SerializeField] private TerrainShadingMode terrainShadingMode = TerrainShadingMode.PolarisGradientLookup;
 
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
@@ -211,7 +212,8 @@ public sealed class TileLoader : MonoBehaviour
         double localMaxHeight,
         int terrainGroupId)
     {
-        GTerrainData terrainData = Polaris.CreateAndInitTerrainData(GTexturingModel.ColorMap);
+        GTexturingModel texturingModel = GetTexturingModel();
+        GTerrainData terrainData = Polaris.CreateAndInitTerrainData(texturingModel);
         terrainData.Geometry.StorageMode = GGeometry.GStorageMode.GenerateOnEnable;
         terrainData.Geometry.Width = terrainWidth;
         terrainData.Geometry.Length = terrainLength;
@@ -220,8 +222,7 @@ public sealed class TileLoader : MonoBehaviour
         terrainData.Geometry.MeshBaseResolution = 0;
         terrainData.Geometry.MeshResolution = 3;
         terrainData.Geometry.ChunkGridSize = Mathf.Max(1, terrainGridSize);
-        terrainData.Shading.CustomMaterial = CreateFallbackTerrainMaterial();
-        terrainData.Shading.UpdateMaterials();
+        ConfigureShading(terrainData, texturingModel);
 
         Texture2D heightMap = Polaris.GetHeightMap(terrainData);
         Color[] pixels = BuildHeightPixels(layers.Heightmap, normalizationMinHeight, normalizationMaxHeight);
@@ -248,6 +249,55 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         return terrain;
+    }
+
+    private void ConfigureShading(GTerrainData terrainData, GTexturingModel texturingModel)
+    {
+        if (terrainShadingMode == TerrainShadingMode.PolarisGradientLookup)
+        {
+            terrainData.Shading.UpdateLookupTextures();
+        }
+
+        Material material = CreateTerrainMaterial(texturingModel);
+        Polaris.SetTerrainMaterial(terrainData, material);
+    }
+
+    private Material CreateTerrainMaterial(GTexturingModel texturingModel)
+    {
+        if (terrainShadingMode == TerrainShadingMode.FallbackLit)
+        {
+            return CreateFallbackTerrainMaterial();
+        }
+
+        Shader baseShader =
+            Shader.Find("Universal Render Pipeline/Lit") ??
+            Shader.Find("Standard");
+
+        if (baseShader == null)
+        {
+            throw new InvalidOperationException("TileLoader could not find a base shader to initialize a Polaris terrain material.");
+        }
+
+        var material = new Material(baseShader)
+        {
+            name = $"TileLoaderTerrainMaterial_{texturingModel}",
+        };
+
+        if (Polaris.InitTerrainMaterial(material, GLightingModel.PBR, texturingModel))
+        {
+            return material;
+        }
+
+        DestroyImmediate(material);
+        Debug.LogWarning($"TileLoader could not initialize a Polaris material for {texturingModel}; falling back to URP Lit.", this);
+        return CreateFallbackTerrainMaterial();
+    }
+
+    private GTexturingModel GetTexturingModel()
+    {
+        return terrainShadingMode == TerrainShadingMode.PolarisGradientLookup
+            ? GTexturingModel.GradientLookup
+            : GTexturingModel.ColorMap;
     }
 
     private void RebuildTerrainSeams(List<GStylizedTerrain> terrains)
@@ -824,5 +874,11 @@ public sealed class TileLoader : MonoBehaviour
         public int UnityTileY { get; }
         public double LocalMinHeight { get; }
         public double LocalMaxHeight { get; }
+    }
+
+    private enum TerrainShadingMode
+    {
+        PolarisGradientLookup,
+        FallbackLit,
     }
 }
