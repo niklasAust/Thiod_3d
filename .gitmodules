@@ -1,0 +1,3 @@
+[submodule "Thiod_3d/Packages/com.niklasaust.worldgen"]
+	path = Thiod_3d/Packages/com.niklasaust.worldgen
+	url = https://github.com/niklasAust/Thiod_worldgen.git
