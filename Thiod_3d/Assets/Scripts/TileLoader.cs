@@ -110,8 +110,10 @@ public sealed class TileLoader : MonoBehaviour
         int minOffset = load3x3Neighborhood ? -1 : 0;
         int maxOffset = load3x3Neighborhood ? 1 : 0;
         var terrainsToCreate = new List<GeneratedTerrainRequest>();
+        var createdTerrains = new List<GStylizedTerrain>();
         double batchMinHeight = double.MaxValue;
         double batchMaxHeight = double.MinValue;
+        int terrainGroupId = GetGeneratedTerrainGroupId();
 
         for (int offsetY = minOffset; offsetY <= maxOffset; offsetY++)
         {
@@ -150,7 +152,7 @@ public sealed class TileLoader : MonoBehaviour
         for (int i = 0; i < terrainsToCreate.Count; i++)
         {
             GeneratedTerrainRequest request = terrainsToCreate[i];
-            CreateTerrain(
+            GStylizedTerrain terrain = CreateTerrain(
                 request.Layers,
                 request.TerrainObjectName,
                 request.LocalPosition,
@@ -159,7 +161,14 @@ public sealed class TileLoader : MonoBehaviour
                 normalizationMinHeight,
                 normalizationMaxHeight,
                 request.LocalMinHeight,
-                request.LocalMaxHeight);
+                request.LocalMaxHeight,
+                terrainGroupId);
+            createdTerrains.Add(terrain);
+        }
+
+        if (createdTerrains.Count > 0)
+        {
+            RebuildTerrainSeams(createdTerrains);
         }
     }
 
@@ -190,7 +199,7 @@ public sealed class TileLoader : MonoBehaviour
         return $"{generatedTerrainName}_{unityTileX}_{unityTileY}";
     }
 
-    private void CreateTerrain(
+    private GStylizedTerrain CreateTerrain(
         TileLayers layers,
         string terrainObjectName,
         Vector3 localPosition,
@@ -199,7 +208,8 @@ public sealed class TileLoader : MonoBehaviour
         double normalizationMinHeight,
         double normalizationMaxHeight,
         double localMinHeight,
-        double localMaxHeight)
+        double localMaxHeight,
+        int terrainGroupId)
     {
         GTerrainData terrainData = Polaris.CreateAndInitTerrainData(GTexturingModel.ColorMap);
         terrainData.Geometry.StorageMode = GGeometry.GStorageMode.GenerateOnEnable;
@@ -220,12 +230,12 @@ public sealed class TileLoader : MonoBehaviour
 
         GStylizedTerrain terrain = Polaris.CreateTerrain(terrainData);
         terrain.name = terrainObjectName;
+        terrain.GroupId = terrainGroupId;
+        terrain.AutoConnect = true;
         terrain.transform.SetParent(transform, false);
         terrain.transform.localPosition = localPosition;
         terrain.transform.localRotation = Quaternion.identity;
         terrain.transform.localScale = Vector3.one;
-
-        Polaris.UpdateTerrainMesh(terrain, new[] { new Rect(0f, 0f, 1f, 1f) });
         terrain.TerrainData.Shading.UpdateMaterials();
 
         if (logHeightStats)
@@ -236,6 +246,28 @@ public sealed class TileLoader : MonoBehaviour
                 $"Normalization range: {normalizationMinHeight.ToString("F3", CultureInfo.InvariantCulture)} to {normalizationMaxHeight.ToString("F3", CultureInfo.InvariantCulture)}.",
                 this);
         }
+
+        return terrain;
+    }
+
+    private void RebuildTerrainSeams(List<GStylizedTerrain> terrains)
+    {
+        GStylizedTerrain.ConnectAdjacentTiles();
+
+        Rect fullRegion = new Rect(0f, 0f, 1f, 1f);
+        for (int i = 0; i < terrains.Count; i++)
+        {
+            GStylizedTerrain terrain = terrains[i];
+            terrain.TerrainData.Geometry.SetRegionDirty(fullRegion);
+            Polaris.UpdateTerrainMesh(terrain, new[] { fullRegion });
+            terrain.TerrainData.Shading.UpdateMaterials();
+        }
+    }
+
+    private int GetGeneratedTerrainGroupId()
+    {
+        int instanceId = Mathf.Abs(GetInstanceID());
+        return instanceId == 0 ? 1 : instanceId;
     }
 
     private static Material CreateFallbackTerrainMaterial()
