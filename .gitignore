@@ -1,0 +1,32 @@
+# Unity generated folders
+Thiod_3d/[Ll]ibrary/
+Thiod_3d/[Tt]emp/
+Thiod_3d/[Oo]bj/
+Thiod_3d/[Bb]uild/
+Thiod_3d/[Bb]uilds/
+Thiod_3d/[Ll]ogs/
+Thiod_3d/[Uu]ser[Ss]ettings/
+Thiod_3d/[Pp]rofiler[Cc]aptures/
+Thiod_3d/[Mm]emoryCaptures/
+Thiod_3d/[Rr]ecordings/
+
+# IDE and editor settings
+Thiod_3d/.vs/
+Thiod_3d/.vscode/
+Thiod_3d/.idea/
+*.csproj
+*.sln
+*.slnx
+*.user
+*.tmp
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS files
+.DS_Store
+Thumbs.db
