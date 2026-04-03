@@ -25,10 +25,14 @@ public sealed class TileLoader : MonoBehaviour
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab";
     private const string DefaultLowlandTerrainMaterialAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/grass01.mat";
+    private const string DefaultLowlandTerrainMaterialVariantAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/grass02.mat";
     private const string DefaultMidHeightTerrainMaterialAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/pine 1.mat";
     private const string DefaultSteepSlopeTerrainMaterialAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/rocks 2.mat";
+    private const string DefaultSteepSlopeTerrainMaterialVariantAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/rocks 3.mat";
     private const string DefaultPeakTerrainMaterialAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/snow.mat";
 
@@ -56,13 +60,24 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private int terrainGridSize = 16;
     [SerializeField] private TerrainShadingMode terrainShadingMode = TerrainShadingMode.PolarisTextureBlend;
     [SerializeField] private Material? lowlandTerrainMaterial;
+    [SerializeField] private Material? lowlandTerrainMaterialVariant;
     [SerializeField] private float lowlandTerrainTileSize = 24f;
     [SerializeField] private Material? midHeightTerrainMaterial;
     [SerializeField] private float midHeightTerrainTileSize = 28f;
     [SerializeField] private Material? steepSlopeTerrainMaterial;
+    [SerializeField] private Material? steepSlopeTerrainMaterialVariant;
     [SerializeField] private float steepSlopeTerrainTileSize = 18f;
     [SerializeField] private Material? peakTerrainMaterial;
     [SerializeField] private float peakTerrainTileSize = 26f;
+    [SerializeField] private float macroVariationScale = 420f;
+    [SerializeField] [Range(0f, 1f)] private float macroVariationStrength = 0.18f;
+    [SerializeField] private float surfaceVariantScale = 220f;
+    [SerializeField] [Range(0f, 1f)] private float surfaceVariantStrength = 0.85f;
+    [SerializeField] [Range(0.01f, 0.49f)] private float surfaceVariantTransition = 0.12f;
+    [SerializeField] [Range(0f, 1f)] private float surfacePhaseOffsetStrength = 0.35f;
+    [SerializeField] private bool mirrorTerrainVariantTextures = true;
+    [SerializeField] private float macroTintScale = 640f;
+    [SerializeField] [Range(0f, 1f)] private float macroTintStrength = 0.14f;
     [SerializeField] [Range(0f, 1f)] private float midHeightStart = 0.24f;
     [SerializeField] [Range(0.01f, 1f)] private float midHeightBlend = 0.18f;
     [SerializeField] [Range(0f, 90f)] private float steepSlopeStartDegrees = 24f;
@@ -454,7 +469,11 @@ public sealed class TileLoader : MonoBehaviour
             name = $"TileLoaderTerrainMaterial_{texturingModel}",
         };
 
-        if (Polaris.InitTerrainMaterial(material, GLightingModel.PBR, texturingModel, GSplatsModel.Splats4))
+        GSplatsModel splatsModel = terrainShadingMode == TerrainShadingMode.PolarisTextureBlend
+            ? GSplatsModel.Splats8
+            : GSplatsModel.Splats4;
+
+        if (Polaris.InitTerrainMaterial(material, GLightingModel.PBR, texturingModel, splatsModel))
         {
             return material;
         }
@@ -547,8 +566,10 @@ public sealed class TileLoader : MonoBehaviour
         splatGroup.Prototypes = new List<GSplatPrototype>
         {
             CreateSplatPrototype(lowlandTerrainMaterial, lowlandTerrainTileSize),
+            CreateSplatPrototype(lowlandTerrainMaterialVariant ?? lowlandTerrainMaterial, lowlandTerrainTileSize),
             CreateSplatPrototype(midHeightTerrainMaterial, midHeightTerrainTileSize),
             CreateSplatPrototype(steepSlopeTerrainMaterial, steepSlopeTerrainTileSize),
+            CreateSplatPrototype(steepSlopeTerrainMaterialVariant ?? steepSlopeTerrainMaterial, steepSlopeTerrainTileSize),
             CreateSplatPrototype(peakTerrainMaterial, peakTerrainTileSize),
         };
 
@@ -560,39 +581,71 @@ public sealed class TileLoader : MonoBehaviour
     {
         int resolutionY = normalizedHeights.GetLength(0);
         int resolutionX = normalizedHeights.GetLength(1);
-        const int layerCount = 4;
+        const int layerCount = 6;
         var alphamaps = new float[resolutionY, resolutionX, layerCount];
         float sampleSpacingX = resolutionX > 1 ? terrainWidth / (resolutionX - 1f) : terrainWidth;
         float sampleSpacingZ = resolutionY > 1 ? terrainLength / (resolutionY - 1f) : terrainLength;
+        Vector2 terrainOrigin = terrain != null
+            ? new Vector2(terrain.transform.localPosition.x, terrain.transform.localPosition.z)
+            : Vector2.zero;
 
         for (int y = 0; y < resolutionY; y++)
         {
             for (int x = 0; x < resolutionX; x++)
             {
+                float worldX = terrainOrigin.x + x * sampleSpacingX;
+                float worldZ = terrainOrigin.y + (resolutionY - 1 - y) * sampleSpacingZ;
                 float normalizedHeight = normalizedHeights[y, x];
+                float macroBias = SampleSignedNoise(worldX, worldZ, macroVariationScale) * macroVariationStrength;
+                float adjustedMidStart = Mathf.Clamp01(midHeightStart + macroBias * 0.5f);
+                float adjustedPeakStart = Mathf.Clamp01(peakHeightStart + macroBias * 0.35f);
+                float adjustedSlopeStart = Mathf.Clamp(steepSlopeStartDegrees + macroBias * 18f, 0f, 90f);
                 float slopeDegrees = terrain != null
                     ? SampleSlopeDegrees(terrain, normalizedHeights, x, y, sampleSpacingX, sampleSpacingZ)
                     : SampleSlopeDegrees(normalizedHeights, x, y, sampleSpacingX, sampleSpacingZ);
-                float peakWeight = SmoothRange(normalizedHeight, peakHeightStart, peakHeightBlend);
-                float cliffWeight = SmoothRange(slopeDegrees, steepSlopeStartDegrees, steepSlopeBlendDegrees) * (1f - peakWeight * 0.4f);
-                float midWeight = SmoothRange(normalizedHeight, midHeightStart, midHeightBlend) * (1f - peakWeight);
+                float peakWeight = SmoothRange(normalizedHeight, adjustedPeakStart, peakHeightBlend);
+                float cliffWeight = SmoothRange(slopeDegrees, adjustedSlopeStart, steepSlopeBlendDegrees) * (1f - peakWeight * 0.4f);
+                float midWeight = SmoothRange(normalizedHeight, adjustedMidStart, midHeightBlend) * (1f - peakWeight);
                 float lowWeight = 1f - Mathf.Clamp01(midWeight + peakWeight);
 
                 lowWeight *= 1f - cliffWeight;
                 midWeight *= 1f - cliffWeight * 0.75f;
 
-                float total = lowWeight + midWeight + cliffWeight + peakWeight;
+                float macroTintBias = SampleSignedNoise(worldX + 173.2f, worldZ - 91.7f, macroTintScale) * macroTintStrength;
+                float lowlandVariantMix = SharpenVariantMix(
+                    0.5f +
+                    SampleSignedNoise(worldX - 47.3f, worldZ + 128.4f, surfaceVariantScale) * 0.5f * surfaceVariantStrength +
+                    macroTintBias,
+                    surfaceVariantTransition);
+                float rockVariantMix = SharpenVariantMix(
+                    0.5f +
+                    SampleSignedNoise(worldX + 281.6f, worldZ + 54.1f, surfaceVariantScale * 0.85f) * 0.5f * surfaceVariantStrength +
+                    macroTintBias * 0.75f,
+                    surfaceVariantTransition);
+                float lowWeightPrimary = lowWeight * (1f - lowlandVariantMix);
+                float lowWeightVariant = lowWeight * lowlandVariantMix;
+                float cliffWeightPrimary = cliffWeight * (1f - rockVariantMix);
+                float cliffWeightVariant = cliffWeight * rockVariantMix;
+
+                float total = lowWeightPrimary + lowWeightVariant + midWeight + cliffWeightPrimary + cliffWeightVariant + peakWeight;
                 if (total <= 1e-5f)
                 {
-                    lowWeight = 1f;
+                    lowWeightPrimary = 1f;
+                    lowWeightVariant = 0f;
+                    midWeight = 0f;
+                    cliffWeightPrimary = 0f;
+                    cliffWeightVariant = 0f;
+                    peakWeight = 0f;
                     total = 1f;
                 }
 
                 int flippedY = resolutionY - 1 - y;
-                alphamaps[flippedY, x, 0] = lowWeight / total;
-                alphamaps[flippedY, x, 1] = midWeight / total;
-                alphamaps[flippedY, x, 2] = cliffWeight / total;
-                alphamaps[flippedY, x, 3] = peakWeight / total;
+                alphamaps[flippedY, x, 0] = lowWeightPrimary / total;
+                alphamaps[flippedY, x, 1] = lowWeightVariant / total;
+                alphamaps[flippedY, x, 2] = midWeight / total;
+                alphamaps[flippedY, x, 3] = cliffWeightPrimary / total;
+                alphamaps[flippedY, x, 4] = cliffWeightVariant / total;
+                alphamaps[flippedY, x, 5] = peakWeight / total;
             }
         }
 
@@ -784,13 +837,15 @@ public sealed class TileLoader : MonoBehaviour
 
         Material material = terrain.TerrainData.Shading.CustomMaterial;
         Vector3 origin = terrain.transform.localPosition;
-        ApplyWorldAlignedSplatOffset(material, "_Splat0", lowlandTerrainTileSize, origin);
-        ApplyWorldAlignedSplatOffset(material, "_Splat1", midHeightTerrainTileSize, origin);
-        ApplyWorldAlignedSplatOffset(material, "_Splat2", steepSlopeTerrainTileSize, origin);
-        ApplyWorldAlignedSplatOffset(material, "_Splat3", peakTerrainTileSize, origin);
+        ApplyWorldAlignedSplatOffset(material, "_Splat0", lowlandTerrainTileSize, origin, 0);
+        ApplyWorldAlignedSplatOffset(material, "_Splat1", lowlandTerrainTileSize, origin, 1);
+        ApplyWorldAlignedSplatOffset(material, "_Splat2", midHeightTerrainTileSize, origin, 2);
+        ApplyWorldAlignedSplatOffset(material, "_Splat3", steepSlopeTerrainTileSize, origin, 3);
+        ApplyWorldAlignedSplatOffset(material, "_Splat4", steepSlopeTerrainTileSize, origin, 4);
+        ApplyWorldAlignedSplatOffset(material, "_Splat5", peakTerrainTileSize, origin, 5);
     }
 
-    private void ApplyWorldAlignedSplatOffset(Material material, string propertyName, float tileSize, Vector3 terrainOrigin)
+    private void ApplyWorldAlignedSplatOffset(Material material, string propertyName, float tileSize, Vector3 terrainOrigin, int variationSeed)
     {
         if (material == null || !material.HasProperty(propertyName))
         {
@@ -798,13 +853,73 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         float safeTileSize = Mathf.Max(1f, tileSize);
-        material.SetTextureScale(propertyName, new Vector2(terrainWidth / safeTileSize, terrainLength / safeTileSize));
-        material.SetTextureOffset(propertyName, new Vector2(terrainOrigin.x / safeTileSize, terrainOrigin.z / safeTileSize));
+        Vector2 sign = ComputeSplatScaleSign(variationSeed);
+        Vector2 phaseOffset = ComputeSplatPhaseOffset(variationSeed);
+        material.SetTextureScale(propertyName, new Vector2((terrainWidth / safeTileSize) * sign.x, (terrainLength / safeTileSize) * sign.y));
+        material.SetTextureOffset(
+            propertyName,
+            new Vector2((terrainOrigin.x / safeTileSize) * sign.x, (terrainOrigin.z / safeTileSize) * sign.y) + phaseOffset);
     }
 
     private static float SmoothRange(float value, float start, float blend)
     {
         return Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((value - start) / Mathf.Max(1e-4f, blend)));
+    }
+
+    private static float SampleSignedNoise(float worldX, float worldZ, float scale)
+    {
+        float safeScale = Mathf.Max(1f, scale);
+        float noise =
+            Mathf.PerlinNoise(worldX / safeScale + 11.37f, worldZ / safeScale + 29.51f) * 0.55f +
+            Mathf.PerlinNoise(worldX / (safeScale * 0.47f) - 73.19f, worldZ / (safeScale * 0.47f) + 41.63f) * 0.3f +
+            Mathf.PerlinNoise(worldX / (safeScale * 1.91f) + 101.8f, worldZ / (safeScale * 1.91f) - 17.24f) * 0.15f;
+        return Mathf.Clamp01(noise) * 2f - 1f;
+    }
+
+    private static float SharpenVariantMix(float rawMix, float transition)
+    {
+        float clampedMix = Mathf.Clamp01(rawMix);
+        float halfTransition = Mathf.Clamp(transition, 0.01f, 0.49f);
+        float lowerBound = 0.5f - halfTransition;
+        float upperBound = 0.5f + halfTransition;
+        return Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(lowerBound, upperBound, clampedMix));
+    }
+
+    private Vector2 ComputeSplatScaleSign(int variationSeed)
+    {
+        if (!mirrorTerrainVariantTextures)
+        {
+            return Vector2.one;
+        }
+
+        return new Vector2((variationSeed & 1) == 0 ? 1f : -1f, (variationSeed & 2) == 0 ? 1f : -1f);
+    }
+
+    private Vector2 ComputeSplatPhaseOffset(int variationSeed)
+    {
+        float strength = Mathf.Clamp01(surfacePhaseOffsetStrength);
+        if (strength <= 0f)
+        {
+            return Vector2.zero;
+        }
+
+        float offsetX = (Hash01(variationSeed * 92821 + 17) * 2f - 1f) * strength;
+        float offsetY = (Hash01(variationSeed * 68917 + 53) * 2f - 1f) * strength;
+        return new Vector2(offsetX, offsetY);
+    }
+
+    private static float Hash01(int seed)
+    {
+        unchecked
+        {
+            uint value = (uint)seed;
+            value ^= value >> 16;
+            value *= 0x7FEB352Du;
+            value ^= value >> 15;
+            value *= 0x846CA68Bu;
+            value ^= value >> 16;
+            return (value & 0x00FFFFFFu) / 16777215f;
+        }
     }
 
     private void RebuildTerrainSeams(List<GStylizedTerrain> terrains)
@@ -1386,13 +1501,20 @@ public sealed class TileLoader : MonoBehaviour
     private void EnsureShadingDefaults()
     {
         lowlandTerrainMaterial ??= LoadDefaultMaterial(DefaultLowlandTerrainMaterialAssetPath);
+        lowlandTerrainMaterialVariant ??= LoadDefaultMaterial(DefaultLowlandTerrainMaterialVariantAssetPath);
         midHeightTerrainMaterial ??= LoadDefaultMaterial(DefaultMidHeightTerrainMaterialAssetPath);
         steepSlopeTerrainMaterial ??= LoadDefaultMaterial(DefaultSteepSlopeTerrainMaterialAssetPath);
+        steepSlopeTerrainMaterialVariant ??= LoadDefaultMaterial(DefaultSteepSlopeTerrainMaterialVariantAssetPath);
         peakTerrainMaterial ??= LoadDefaultMaterial(DefaultPeakTerrainMaterialAssetPath);
         lowlandTerrainTileSize = Mathf.Max(1f, lowlandTerrainTileSize);
         midHeightTerrainTileSize = Mathf.Max(1f, midHeightTerrainTileSize);
         steepSlopeTerrainTileSize = Mathf.Max(1f, steepSlopeTerrainTileSize);
         peakTerrainTileSize = Mathf.Max(1f, peakTerrainTileSize);
+        macroVariationScale = Mathf.Max(1f, macroVariationScale);
+        surfaceVariantScale = Mathf.Max(1f, surfaceVariantScale);
+        surfaceVariantTransition = Mathf.Clamp(surfaceVariantTransition, 0.01f, 0.49f);
+        surfacePhaseOffsetStrength = Mathf.Clamp01(surfacePhaseOffsetStrength);
+        macroTintScale = Mathf.Max(1f, macroTintScale);
         midHeightBlend = Mathf.Max(0.01f, midHeightBlend);
         steepSlopeBlendDegrees = Mathf.Max(0.1f, steepSlopeBlendDegrees);
         peakHeightBlend = Mathf.Max(0.01f, peakHeightBlend);
