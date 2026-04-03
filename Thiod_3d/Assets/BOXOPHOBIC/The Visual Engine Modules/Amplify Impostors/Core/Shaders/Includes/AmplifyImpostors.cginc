@@ -1,0 +1,5 @@
+﻿#pragma once
+
+#ifndef AMPLIFY_IMPOSTORS_INCLUDED
+#define AMPLIFY_IMPOSTORS_INCLUDED 1
+#endif
