@@ -23,6 +23,14 @@ public sealed class TileLoader : MonoBehaviour
     private const string ConiferObjectId = "vegetation.conifer";
     private const string DefaultConiferPrefabAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab";
+    private const string DefaultLowlandTerrainMaterialAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/grass01.mat";
+    private const string DefaultMidHeightTerrainMaterialAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/pine 1.mat";
+    private const string DefaultSteepSlopeTerrainMaterialAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/rocks 2.mat";
+    private const string DefaultPeakTerrainMaterialAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/snow.mat";
 
     [Header("World Source")]
     [SerializeField] private string worldDataFile = "test_map.msgpack";
@@ -46,10 +54,21 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float terrainLength = 128f;
     [SerializeField] private float terrainHeight = 30f;
     [SerializeField] private int terrainGridSize = 16;
-    [SerializeField] private TerrainShadingMode terrainShadingMode = TerrainShadingMode.PolarisGradientLookup;
-    [SerializeField] private Gradient colorByNormal = CreateDefaultColorByNormalGradient();
-    [SerializeField] private AnimationCurve blendByHeight = CreateDefaultBlendByHeightCurve();
-    [SerializeField] private Gradient colorByHeight = CreateDefaultColorByHeightGradient();
+    [SerializeField] private TerrainShadingMode terrainShadingMode = TerrainShadingMode.PolarisTextureBlend;
+    [SerializeField] private Material? lowlandTerrainMaterial;
+    [SerializeField] private float lowlandTerrainTileSize = 24f;
+    [SerializeField] private Material? midHeightTerrainMaterial;
+    [SerializeField] private float midHeightTerrainTileSize = 28f;
+    [SerializeField] private Material? steepSlopeTerrainMaterial;
+    [SerializeField] private float steepSlopeTerrainTileSize = 18f;
+    [SerializeField] private Material? peakTerrainMaterial;
+    [SerializeField] private float peakTerrainTileSize = 26f;
+    [SerializeField] [Range(0f, 1f)] private float midHeightStart = 0.24f;
+    [SerializeField] [Range(0.01f, 1f)] private float midHeightBlend = 0.18f;
+    [SerializeField] [Range(0f, 90f)] private float steepSlopeStartDegrees = 24f;
+    [SerializeField] [Range(0.1f, 90f)] private float steepSlopeBlendDegrees = 12f;
+    [SerializeField] [Range(0f, 1f)] private float peakHeightStart = 0.74f;
+    [SerializeField] [Range(0.01f, 1f)] private float peakHeightBlend = 0.16f;
 
     [Header("Vegetation Output")]
     [SerializeField] private bool placeConiferTrees = true;
@@ -143,11 +162,6 @@ public sealed class TileLoader : MonoBehaviour
 #if !GRIFFIN
         return;
 #else
-        if (terrainShadingMode != TerrainShadingMode.PolarisGradientLookup)
-        {
-            return;
-        }
-
         foreach (GStylizedTerrain terrain in GetGeneratedTerrains())
         {
             if (terrain == null || terrain.TerrainData == null)
@@ -155,9 +169,9 @@ public sealed class TileLoader : MonoBehaviour
                 continue;
             }
 
-            ApplyGradientLookupSettings(terrain.TerrainData.Shading);
-            terrain.TerrainData.Shading.UpdateLookupTextures();
+            ApplyTerrainShading(terrain);
             terrain.TerrainData.Shading.UpdateMaterials();
+            ApplyWorldAlignedSplatMaterialOffsets(terrain);
         }
 #endif
     }
@@ -305,6 +319,7 @@ public sealed class TileLoader : MonoBehaviour
         if (createdTerrains.Count > 0)
         {
             RebuildTerrainSeams(createdTerrains);
+            ApplyTerrainShading(createdTerrains);
             PopulateVegetation(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
             if (Application.isPlaying)
             {
@@ -376,7 +391,7 @@ public sealed class TileLoader : MonoBehaviour
         terrainData.Geometry.MeshBaseResolution = 0;
         terrainData.Geometry.MeshResolution = 3;
         terrainData.Geometry.ChunkGridSize = Mathf.Max(1, terrainGridSize);
-        ConfigureShading(terrainData, texturingModel);
+        ConfigureShading(terrainData, texturingModel, layers.Heightmap, normalizationMinHeight, normalizationMaxHeight);
 
         Texture2D heightMap = Polaris.GetHeightMap(terrainData);
         Color[] pixels = BuildHeightPixels(layers.Heightmap, normalizationMinHeight, normalizationMaxHeight);
@@ -392,6 +407,7 @@ public sealed class TileLoader : MonoBehaviour
         terrain.transform.localRotation = Quaternion.identity;
         terrain.transform.localScale = Vector3.one;
         terrain.TerrainData.Shading.UpdateMaterials();
+        ApplyWorldAlignedSplatMaterialOffsets(terrain);
 
         if (logHeightStats)
         {
@@ -405,16 +421,16 @@ public sealed class TileLoader : MonoBehaviour
         return terrain;
     }
 
-    private void ConfigureShading(GTerrainData terrainData, GTexturingModel texturingModel)
+    private void ConfigureShading(
+        GTerrainData terrainData,
+        GTexturingModel texturingModel,
+        double[,] sourceHeightmap,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
     {
-        if (terrainShadingMode == TerrainShadingMode.PolarisGradientLookup)
-        {
-            ApplyGradientLookupSettings(terrainData.Shading);
-            terrainData.Shading.UpdateLookupTextures();
-        }
-
         Material material = CreateTerrainMaterial(texturingModel);
         Polaris.SetTerrainMaterial(terrainData, material);
+        ApplyTerrainShading(terrainData, sourceHeightmap, normalizationMinHeight, normalizationMaxHeight);
     }
 
     private Material CreateTerrainMaterial(GTexturingModel texturingModel)
@@ -438,7 +454,7 @@ public sealed class TileLoader : MonoBehaviour
             name = $"TileLoaderTerrainMaterial_{texturingModel}",
         };
 
-        if (Polaris.InitTerrainMaterial(material, GLightingModel.PBR, texturingModel))
+        if (Polaris.InitTerrainMaterial(material, GLightingModel.PBR, texturingModel, GSplatsModel.Splats4))
         {
             return material;
         }
@@ -457,22 +473,338 @@ public sealed class TileLoader : MonoBehaviour
 
     private GTexturingModel GetTexturingModel()
     {
-        return terrainShadingMode == TerrainShadingMode.PolarisGradientLookup
-            ? GTexturingModel.GradientLookup
+        return terrainShadingMode == TerrainShadingMode.PolarisTextureBlend
+            ? GTexturingModel.Splat
             : GTexturingModel.ColorMap;
     }
 
-    private void ApplyGradientLookupSettings(GShading shading)
+    private void ApplyTerrainShading(
+        GTerrainData terrainData,
+        double[,] sourceHeightmap,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
     {
-        if (shading == null)
+        if (terrainData == null || terrainData.Shading == null)
         {
             return;
         }
 
         EnsureShadingDefaults();
-        shading.ColorByNormal = CloneGradient(colorByNormal);
-        shading.ColorBlendCurve = CloneCurve(blendByHeight);
-        shading.ColorByHeight = CloneGradient(colorByHeight);
+        if (terrainShadingMode != TerrainShadingMode.PolarisTextureBlend)
+        {
+            return;
+        }
+
+        float[,] normalizedHeights = BuildNormalizedHeights(sourceHeightmap, normalizationMinHeight, normalizationMaxHeight);
+        ApplyTextureBlendSettings(terrainData.Shading, terrainData, normalizedHeights, null);
+    }
+
+    private void ApplyTerrainShading(IReadOnlyList<GStylizedTerrain> terrains)
+    {
+        for (int i = 0; i < terrains.Count; i++)
+        {
+            GStylizedTerrain terrain = terrains[i];
+            if (terrain == null || terrain.TerrainData == null)
+            {
+                continue;
+            }
+
+            ApplyTerrainShading(terrain);
+            terrain.TerrainData.Shading.UpdateMaterials();
+            ApplyWorldAlignedSplatMaterialOffsets(terrain);
+        }
+    }
+
+    private void ApplyTerrainShading(GStylizedTerrain terrain)
+    {
+        if (terrain == null || terrain.TerrainData == null || terrain.TerrainData.Shading == null || terrainShadingMode != TerrainShadingMode.PolarisTextureBlend)
+        {
+            return;
+        }
+
+        EnsureShadingDefaults();
+        Texture2D? heightTexture = terrain.TerrainData.Geometry?.HeightMap;
+        if (heightTexture == null)
+        {
+            return;
+        }
+
+        float[,] normalizedHeights = DecodeNormalizedHeights(heightTexture);
+        ApplyTextureBlendSettings(terrain.TerrainData.Shading, terrain.TerrainData, normalizedHeights, terrain);
+    }
+
+    private void ApplyTextureBlendSettings(GShading shading, GTerrainData terrainData, float[,] normalizedHeights, GStylizedTerrain? terrain)
+    {
+        GSplatPrototypeGroup splatGroup = shading.Splats;
+        if (splatGroup == null)
+        {
+            splatGroup = ScriptableObject.CreateInstance<GSplatPrototypeGroup>();
+            splatGroup.name = "TileLoader Splat Prototype Group";
+            GCommon.TryAddObjectToAsset(splatGroup, terrainData);
+        }
+
+        shading.Splats = splatGroup;
+        splatGroup.Prototypes = new List<GSplatPrototype>
+        {
+            CreateSplatPrototype(lowlandTerrainMaterial, lowlandTerrainTileSize),
+            CreateSplatPrototype(midHeightTerrainMaterial, midHeightTerrainTileSize),
+            CreateSplatPrototype(steepSlopeTerrainMaterial, steepSlopeTerrainTileSize),
+            CreateSplatPrototype(peakTerrainMaterial, peakTerrainTileSize),
+        };
+
+        shading.SplatControlResolution = Mathf.Max(32, Mathf.Max(normalizedHeights.GetLength(0), normalizedHeights.GetLength(1)));
+        shading.SetAlphamaps(BuildTextureBlendAlphamaps(normalizedHeights, terrain));
+    }
+
+    private float[,,] BuildTextureBlendAlphamaps(float[,] normalizedHeights, GStylizedTerrain? terrain)
+    {
+        int resolutionY = normalizedHeights.GetLength(0);
+        int resolutionX = normalizedHeights.GetLength(1);
+        const int layerCount = 4;
+        var alphamaps = new float[resolutionY, resolutionX, layerCount];
+        float sampleSpacingX = resolutionX > 1 ? terrainWidth / (resolutionX - 1f) : terrainWidth;
+        float sampleSpacingZ = resolutionY > 1 ? terrainLength / (resolutionY - 1f) : terrainLength;
+
+        for (int y = 0; y < resolutionY; y++)
+        {
+            for (int x = 0; x < resolutionX; x++)
+            {
+                float normalizedHeight = normalizedHeights[y, x];
+                float slopeDegrees = terrain != null
+                    ? SampleSlopeDegrees(terrain, normalizedHeights, x, y, sampleSpacingX, sampleSpacingZ)
+                    : SampleSlopeDegrees(normalizedHeights, x, y, sampleSpacingX, sampleSpacingZ);
+                float peakWeight = SmoothRange(normalizedHeight, peakHeightStart, peakHeightBlend);
+                float cliffWeight = SmoothRange(slopeDegrees, steepSlopeStartDegrees, steepSlopeBlendDegrees) * (1f - peakWeight * 0.4f);
+                float midWeight = SmoothRange(normalizedHeight, midHeightStart, midHeightBlend) * (1f - peakWeight);
+                float lowWeight = 1f - Mathf.Clamp01(midWeight + peakWeight);
+
+                lowWeight *= 1f - cliffWeight;
+                midWeight *= 1f - cliffWeight * 0.75f;
+
+                float total = lowWeight + midWeight + cliffWeight + peakWeight;
+                if (total <= 1e-5f)
+                {
+                    lowWeight = 1f;
+                    total = 1f;
+                }
+
+                int flippedY = resolutionY - 1 - y;
+                alphamaps[flippedY, x, 0] = lowWeight / total;
+                alphamaps[flippedY, x, 1] = midWeight / total;
+                alphamaps[flippedY, x, 2] = cliffWeight / total;
+                alphamaps[flippedY, x, 3] = peakWeight / total;
+            }
+        }
+
+        return alphamaps;
+    }
+
+    private GSplatPrototype CreateSplatPrototype(Material? sourceMaterial, float tileSize)
+    {
+        return new GSplatPrototype
+        {
+            Texture = ExtractDiffuseTexture(sourceMaterial),
+            NormalMap = ExtractNormalTexture(sourceMaterial),
+            TileSize = new Vector2(Mathf.Max(1f, tileSize), Mathf.Max(1f, tileSize)),
+            TileOffset = Vector2.zero,
+            Metallic = ExtractFloat(sourceMaterial, "_Metallic", 0f),
+            Smoothness = Mathf.Max(
+                ExtractFloat(sourceMaterial, "_Smoothness", 0f),
+                ExtractFloat(sourceMaterial, "_Glossiness", 0f)),
+        };
+    }
+
+    private static Texture2D? ExtractDiffuseTexture(Material? sourceMaterial)
+    {
+        if (sourceMaterial == null)
+        {
+            return null;
+        }
+
+        return sourceMaterial.GetTexture("_BaseMap") as Texture2D ??
+               sourceMaterial.GetTexture("_MainTex") as Texture2D;
+    }
+
+    private static Texture2D? ExtractNormalTexture(Material? sourceMaterial)
+    {
+        if (sourceMaterial == null)
+        {
+            return null;
+        }
+
+        return sourceMaterial.GetTexture("_BumpMap") as Texture2D ??
+               sourceMaterial.GetTexture("_NormalMap") as Texture2D;
+    }
+
+    private static float ExtractFloat(Material? sourceMaterial, string propertyName, float fallback)
+    {
+        return sourceMaterial != null && sourceMaterial.HasProperty(propertyName)
+            ? sourceMaterial.GetFloat(propertyName)
+            : fallback;
+    }
+
+    private static float[,] BuildNormalizedHeights(double[,] sourceHeightmap, double minHeight, double maxHeight)
+    {
+        int resolutionY = sourceHeightmap.GetLength(0);
+        int resolutionX = sourceHeightmap.GetLength(1);
+        var normalizedHeights = new float[resolutionY, resolutionX];
+        double range = Math.Max(maxHeight - minHeight, 1e-6);
+
+        for (int y = 0; y < resolutionY; y++)
+        {
+            for (int x = 0; x < resolutionX; x++)
+            {
+                normalizedHeights[y, x] = Mathf.Clamp01((float)((sourceHeightmap[y, x] - minHeight) / range));
+            }
+        }
+
+        return normalizedHeights;
+    }
+
+    private float SampleSlopeDegrees(GStylizedTerrain terrain, float[,] normalizedHeights, int x, int y, float sampleSpacingX, float sampleSpacingZ)
+    {
+        int resolutionY = normalizedHeights.GetLength(0);
+        int resolutionX = normalizedHeights.GetLength(1);
+        float leftHeight = SampleNormalizedHeightWithNeighbors(terrain, normalizedHeights, x - 1, y, resolutionX, resolutionY) * terrainHeight;
+        float rightHeight = SampleNormalizedHeightWithNeighbors(terrain, normalizedHeights, x + 1, y, resolutionX, resolutionY) * terrainHeight;
+        float downHeight = SampleNormalizedHeightWithNeighbors(terrain, normalizedHeights, x, y - 1, resolutionX, resolutionY) * terrainHeight;
+        float upHeight = SampleNormalizedHeightWithNeighbors(terrain, normalizedHeights, x, y + 1, resolutionX, resolutionY) * terrainHeight;
+
+        float dHdX = (rightHeight - leftHeight) / (2f * Mathf.Max(sampleSpacingX, 1e-4f));
+        float dHdZ = (upHeight - downHeight) / (2f * Mathf.Max(sampleSpacingZ, 1e-4f));
+        return Mathf.Atan(Mathf.Sqrt(dHdX * dHdX + dHdZ * dHdZ)) * Mathf.Rad2Deg;
+    }
+
+    private static float[,] DecodeNormalizedHeights(Texture2D heightTexture)
+    {
+        int resolutionY = heightTexture.height;
+        int resolutionX = heightTexture.width;
+        var normalizedHeights = new float[resolutionY, resolutionX];
+        Color[] pixels = heightTexture.GetPixels();
+
+        for (int y = 0; y < resolutionY; y++)
+        {
+            for (int x = 0; x < resolutionX; x++)
+            {
+                int flippedY = resolutionY - 1 - y;
+                Color sample = pixels[flippedY * resolutionX + x];
+                float height01 = 0f;
+                float subdiv01 = 0f;
+                float visibility01 = 0f;
+                Polaris.DecodeHeightMapSample(sample, ref height01, ref subdiv01, ref visibility01);
+                normalizedHeights[y, x] = height01;
+            }
+        }
+
+        return normalizedHeights;
+    }
+
+    private float SampleSlopeDegrees(float[,] normalizedHeights, int x, int y, float sampleSpacingX, float sampleSpacingZ)
+    {
+        int resolutionY = normalizedHeights.GetLength(0);
+        int resolutionX = normalizedHeights.GetLength(1);
+        int left = Mathf.Max(x - 1, 0);
+        int right = Mathf.Min(x + 1, resolutionX - 1);
+        int down = Mathf.Max(y - 1, 0);
+        int up = Mathf.Min(y + 1, resolutionY - 1);
+
+        float leftHeight = normalizedHeights[y, left] * terrainHeight;
+        float rightHeight = normalizedHeights[y, right] * terrainHeight;
+        float downHeight = normalizedHeights[down, x] * terrainHeight;
+        float upHeight = normalizedHeights[up, x] * terrainHeight;
+
+        float dHdX = right == left ? 0f : (rightHeight - leftHeight) / ((right - left) * Mathf.Max(sampleSpacingX, 1e-4f));
+        float dHdZ = up == down ? 0f : (upHeight - downHeight) / ((up - down) * Mathf.Max(sampleSpacingZ, 1e-4f));
+        return Mathf.Atan(Mathf.Sqrt(dHdX * dHdX + dHdZ * dHdZ)) * Mathf.Rad2Deg;
+    }
+
+    private static float SampleNormalizedHeightWithNeighbors(
+        GStylizedTerrain terrain,
+        float[,] normalizedHeights,
+        int sampleX,
+        int sampleY,
+        int resolutionX,
+        int resolutionY)
+    {
+        if (sampleX >= 0 && sampleX < resolutionX && sampleY >= 0 && sampleY < resolutionY)
+        {
+            return normalizedHeights[sampleY, sampleX];
+        }
+
+        if (sampleX < 0 && sampleY >= 0 && sampleY < resolutionY)
+        {
+            return SampleTerrainTextureHeight(terrain.LeftNeighbor, resolutionX - 1, sampleY, normalizedHeights[sampleY, 0]);
+        }
+
+        if (sampleX >= resolutionX && sampleY >= 0 && sampleY < resolutionY)
+        {
+            return SampleTerrainTextureHeight(terrain.RightNeighbor, 0, sampleY, normalizedHeights[sampleY, resolutionX - 1]);
+        }
+
+        if (sampleY < 0 && sampleX >= 0 && sampleX < resolutionX)
+        {
+            return SampleTerrainTextureHeight(terrain.TopNeighbor, sampleX, resolutionY - 1, normalizedHeights[0, sampleX]);
+        }
+
+        if (sampleY >= resolutionY && sampleX >= 0 && sampleX < resolutionX)
+        {
+            return SampleTerrainTextureHeight(terrain.BottomNeighbor, sampleX, 0, normalizedHeights[resolutionY - 1, sampleX]);
+        }
+
+        int clampedX = Mathf.Clamp(sampleX, 0, resolutionX - 1);
+        int clampedY = Mathf.Clamp(sampleY, 0, resolutionY - 1);
+        return normalizedHeights[clampedY, clampedX];
+    }
+
+    private static float SampleTerrainTextureHeight(GStylizedTerrain? terrain, int x, int y, float fallback)
+    {
+        Texture2D? heightTexture = terrain?.TerrainData?.Geometry?.HeightMap;
+        if (heightTexture == null)
+        {
+            return fallback;
+        }
+
+        int clampedX = Mathf.Clamp(x, 0, heightTexture.width - 1);
+        int clampedY = Mathf.Clamp(y, 0, heightTexture.height - 1);
+        int flippedY = heightTexture.height - 1 - clampedY;
+        Color sample = heightTexture.GetPixel(clampedX, flippedY);
+        float height01 = 0f;
+        float subdiv01 = 0f;
+        float visibility01 = 0f;
+        Polaris.DecodeHeightMapSample(sample, ref height01, ref subdiv01, ref visibility01);
+        return height01;
+    }
+
+    private void ApplyWorldAlignedSplatMaterialOffsets(GStylizedTerrain terrain)
+    {
+        if (terrainShadingMode != TerrainShadingMode.PolarisTextureBlend || terrain?.TerrainData?.Shading?.CustomMaterial == null)
+        {
+            return;
+        }
+
+        Material material = terrain.TerrainData.Shading.CustomMaterial;
+        Vector3 origin = terrain.transform.localPosition;
+        ApplyWorldAlignedSplatOffset(material, "_Splat0", lowlandTerrainTileSize, origin);
+        ApplyWorldAlignedSplatOffset(material, "_Splat1", midHeightTerrainTileSize, origin);
+        ApplyWorldAlignedSplatOffset(material, "_Splat2", steepSlopeTerrainTileSize, origin);
+        ApplyWorldAlignedSplatOffset(material, "_Splat3", peakTerrainTileSize, origin);
+    }
+
+    private void ApplyWorldAlignedSplatOffset(Material material, string propertyName, float tileSize, Vector3 terrainOrigin)
+    {
+        if (material == null || !material.HasProperty(propertyName))
+        {
+            return;
+        }
+
+        float safeTileSize = Mathf.Max(1f, tileSize);
+        material.SetTextureScale(propertyName, new Vector2(terrainWidth / safeTileSize, terrainLength / safeTileSize));
+        material.SetTextureOffset(propertyName, new Vector2(terrainOrigin.x / safeTileSize, terrainOrigin.z / safeTileSize));
+    }
+
+    private static float SmoothRange(float value, float start, float blend)
+    {
+        return Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((value - start) / Mathf.Max(1e-4f, blend)));
     }
 
     private void RebuildTerrainSeams(List<GStylizedTerrain> terrains)
@@ -1053,9 +1385,17 @@ public sealed class TileLoader : MonoBehaviour
 
     private void EnsureShadingDefaults()
     {
-        colorByNormal ??= CreateDefaultColorByNormalGradient();
-        blendByHeight ??= CreateDefaultBlendByHeightCurve();
-        colorByHeight ??= CreateDefaultColorByHeightGradient();
+        lowlandTerrainMaterial ??= LoadDefaultMaterial(DefaultLowlandTerrainMaterialAssetPath);
+        midHeightTerrainMaterial ??= LoadDefaultMaterial(DefaultMidHeightTerrainMaterialAssetPath);
+        steepSlopeTerrainMaterial ??= LoadDefaultMaterial(DefaultSteepSlopeTerrainMaterialAssetPath);
+        peakTerrainMaterial ??= LoadDefaultMaterial(DefaultPeakTerrainMaterialAssetPath);
+        lowlandTerrainTileSize = Mathf.Max(1f, lowlandTerrainTileSize);
+        midHeightTerrainTileSize = Mathf.Max(1f, midHeightTerrainTileSize);
+        steepSlopeTerrainTileSize = Mathf.Max(1f, steepSlopeTerrainTileSize);
+        peakTerrainTileSize = Mathf.Max(1f, peakTerrainTileSize);
+        midHeightBlend = Mathf.Max(0.01f, midHeightBlend);
+        steepSlopeBlendDegrees = Mathf.Max(0.1f, steepSlopeBlendDegrees);
+        peakHeightBlend = Mathf.Max(0.01f, peakHeightBlend);
     }
 
     private void EnsureVegetationDefaults()
@@ -1072,73 +1412,13 @@ public sealed class TileLoader : MonoBehaviour
         coniferOptimizationInterval = Mathf.Max(0.05f, coniferOptimizationInterval);
     }
 
-    private static Gradient CloneGradient(Gradient source)
+    private static Material? LoadDefaultMaterial(string assetPath)
     {
-        if (source == null)
-        {
-            return new Gradient();
-        }
-
-        var clone = new Gradient();
-        clone.SetKeys(source.colorKeys, source.alphaKeys);
-        clone.mode = source.mode;
-        return clone;
-    }
-
-    private static AnimationCurve CloneCurve(AnimationCurve source)
-    {
-        if (source == null)
-        {
-            return new AnimationCurve();
-        }
-
-        return new AnimationCurve(source.keys);
-    }
-
-    private static Gradient CreateDefaultColorByNormalGradient()
-    {
-        var gradient = new Gradient();
-        gradient.SetKeys(
-            new[]
-            {
-                new GradientColorKey(new Color(0.18f, 0.24f, 0.16f), 0f),
-                new GradientColorKey(new Color(0.48f, 0.46f, 0.38f), 0.45f),
-                new GradientColorKey(new Color(0.78f, 0.77f, 0.74f), 1f),
-            },
-            new[]
-            {
-                new GradientAlphaKey(1f, 0f),
-                new GradientAlphaKey(1f, 1f),
-            });
-        return gradient;
-    }
-
-    private static Gradient CreateDefaultColorByHeightGradient()
-    {
-        var gradient = new Gradient();
-        gradient.SetKeys(
-            new[]
-            {
-                new GradientColorKey(new Color(0.21f, 0.33f, 0.19f), 0f),
-                new GradientColorKey(new Color(0.34f, 0.47f, 0.24f), 0.28f),
-                new GradientColorKey(new Color(0.53f, 0.48f, 0.37f), 0.62f),
-                new GradientColorKey(new Color(0.9f, 0.92f, 0.95f), 1f),
-            },
-            new[]
-            {
-                new GradientAlphaKey(1f, 0f),
-                new GradientAlphaKey(1f, 1f),
-            });
-        return gradient;
-    }
-
-    private static AnimationCurve CreateDefaultBlendByHeightCurve()
-    {
-        return new AnimationCurve(
-            new Keyframe(0f, 0.18f, 0f, 0.5f),
-            new Keyframe(0.45f, 0.4f, 0.5f, 0.5f),
-            new Keyframe(0.75f, 0.72f, 0.5f, 0.5f),
-            new Keyframe(1f, 1f, 0.5f, 0f));
+#if UNITY_EDITOR
+        return AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+#else
+        return null;
+#endif
     }
 
     private static Material CreateFallbackTerrainMaterial()
@@ -1776,7 +2056,7 @@ public sealed class TileLoader : MonoBehaviour
 
     private enum TerrainShadingMode
     {
-        PolarisGradientLookup,
+        PolarisTextureBlend,
         FallbackLit,
     }
 }
