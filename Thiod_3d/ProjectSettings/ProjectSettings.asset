@@ -826,7 +826,7 @@ PlayerSettings:
   webWasm2023: 0
   webEnableSubmoduleStrippingCompatibility: 0
   scriptingDefineSymbols:
-    Standalone: GRIFFIN_URP;GRIFFIN;GRIFFIN_BURST;GRIFFIN_3
+    Standalone: GRIFFIN_URP;GRIFFIN;GRIFFIN_BURST;GRIFFIN_3;FIRST_PERSON_CONTROLLER;THIRD_PERSON_CONTROLLER;ULTIMATE_CHARACTER_CONTROLLER_UNIVERSALRP;TEXTMESH_PRO_PRESENT
   additionalCompilerArguments: {}
   platformArchitecture: {}
   scriptingBackend:

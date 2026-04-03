@@ -31,10 +31,10 @@ TagManager:
   - 
   - 
   - 
-  - 
-  - 
-  - 
-  - 
+  - Enemy
+  - MovingPlatform
+  - VisualEffect
+  - Overlay
   - POLARIS RAYCAST
   - POLARIS SPLINE
   m_SortingLayers:
