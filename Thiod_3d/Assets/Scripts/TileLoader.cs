@@ -5,14 +5,24 @@ using System.IO;
 using System.Linq;
 using UnityEngine;
 using WorldGen;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 #if GRIFFIN
 using Pinwheel.Griffin;
 using Pinwheel.Griffin.API;
 #endif
 
+#nullable enable
+
 [ExecuteAlways]
 public sealed class TileLoader : MonoBehaviour
 {
+    private const int ConiferObjectNumericId = 22;
+    private const string ConiferObjectId = "vegetation.conifer";
+    private const string DefaultConiferPrefabAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab";
+
     [Header("World Source")]
     [SerializeField] private string worldDataFile = "test_map.msgpack";
     [SerializeField] private bool loadOnEnableInEditMode = true;
@@ -40,6 +50,11 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private AnimationCurve blendByHeight = CreateDefaultBlendByHeightCurve();
     [SerializeField] private Gradient colorByHeight = CreateDefaultColorByHeightGradient();
 
+    [Header("Vegetation Output")]
+    [SerializeField] private bool placeConiferTrees = true;
+    [SerializeField] private string generatedVegetationContainerName = "Vegetation";
+    [SerializeField] private float coniferVerticalOffset = 0f;
+
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
 
@@ -65,6 +80,7 @@ public sealed class TileLoader : MonoBehaviour
 
     private void OnValidate()
     {
+        EnsureVegetationDefaults();
 #if GRIFFIN
         EnsureShadingDefaults();
         ApplyShadingToGeneratedTerrains();
@@ -128,6 +144,7 @@ public sealed class TileLoader : MonoBehaviour
             LoadedWorldData loadedWorldData = ReconstructWorldData(rawWorldData);
             GenerationSettings settings = ResolveGenerationSettings(loadedWorldData.Metadata);
 
+            EnsureConiferDefinitionRegistered();
             var tileGenerator = new TileGenerator(loadedWorldData.WorldData, loadedWorldData.Seed);
             CreateOrUpdateTerrains(tileGenerator, loadedWorldData, settings);
             hasLoadedInCurrentEnableCycle = true;
@@ -245,6 +262,7 @@ public sealed class TileLoader : MonoBehaviour
         if (createdTerrains.Count > 0)
         {
             RebuildTerrainSeams(createdTerrains);
+            PopulateVegetation(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
         }
     }
 
@@ -422,6 +440,278 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
+    private void PopulateVegetation(
+        IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
+        IReadOnlyList<GStylizedTerrain> terrains,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        if (!placeConiferTrees)
+        {
+            return;
+        }
+
+        int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
+        for (int i = 0; i < terrainCount; i++)
+        {
+            GeneratedTerrainRequest request = terrainRequests[i];
+            GStylizedTerrain terrain = terrains[i];
+            PopulateConiferTrees(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+        }
+    }
+
+    private void PopulateConiferTrees(
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        if (terrain == null || request.Layers.PlacedObjects == null || request.Layers.PlacedObjects.Count == 0)
+        {
+            return;
+        }
+
+        Transform? vegetationContainer = null;
+        foreach (TileObjectPlacement placement in request.Layers.PlacedObjects)
+        {
+            if (!IsConiferPlacement(placement))
+            {
+                continue;
+            }
+
+            GameObject? prefab = LoadPrefabForPlacement(placement);
+            if (prefab == null)
+            {
+                continue;
+            }
+
+            vegetationContainer ??= CreateVegetationContainer(terrain.transform);
+            GameObject? instance = InstantiatePlacementPrefab(prefab);
+            if (instance == null)
+            {
+                continue;
+            }
+
+            instance.name = prefab.name;
+            instance.transform.SetParent(vegetationContainer, false);
+            instance.transform.localPosition = GetConiferLocalPosition(
+                request.Layers.Heightmap,
+                placement,
+                normalizationMinHeight,
+                normalizationMaxHeight);
+            instance.transform.localRotation = Quaternion.identity;
+            instance.transform.localScale = Vector3.one;
+        }
+    }
+
+    private Transform CreateVegetationContainer(Transform terrainTransform)
+    {
+        string containerName = string.IsNullOrWhiteSpace(generatedVegetationContainerName)
+            ? "Vegetation"
+            : generatedVegetationContainerName.Trim();
+        Transform existing = terrainTransform.Find(containerName);
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        var container = new GameObject(containerName);
+        container.transform.SetParent(terrainTransform, false);
+        container.transform.localPosition = Vector3.zero;
+        container.transform.localRotation = Quaternion.identity;
+        container.transform.localScale = Vector3.one;
+        return container.transform;
+    }
+
+    private static GameObject? InstantiatePlacementPrefab(GameObject prefab)
+    {
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            return PrefabUtility.InstantiatePrefab(prefab) as GameObject;
+        }
+#endif
+        return Instantiate(prefab);
+    }
+
+    private GameObject? LoadPrefabForPlacement(TileObjectPlacement placement)
+    {
+        string? rawPath = placement.PrefabPath ?? placement.Definition.PrefabPath;
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return null;
+        }
+
+#if UNITY_EDITOR
+        string? assetPath = NormalizeAssetPath(rawPath);
+        if (!string.IsNullOrEmpty(assetPath))
+        {
+            GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (asset != null)
+            {
+                return asset;
+            }
+        }
+#endif
+
+        string? resourcesPath = NormalizeResourcesPath(rawPath);
+        if (!string.IsNullOrEmpty(resourcesPath))
+        {
+            GameObject resource = Resources.Load<GameObject>(resourcesPath);
+            if (resource != null)
+            {
+                return resource;
+            }
+        }
+
+        Debug.LogWarning($"TileLoader could not resolve prefab path '{rawPath}' for placement '{placement.Definition.Id}'.", this);
+        return null;
+    }
+
+    private static string? NormalizeAssetPath(string rawPath)
+    {
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return null;
+        }
+
+        string normalized = rawPath.Replace('\\', '/').Trim();
+        if (!normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        if (!normalized.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized += ".prefab";
+        }
+
+        return normalized;
+    }
+
+    private static string? NormalizeResourcesPath(string rawPath)
+    {
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return null;
+        }
+
+        string normalized = rawPath.Replace('\\', '/').Trim();
+        if (normalized.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^7];
+        }
+
+        const string resourcesPrefix = "Resources/";
+        int resourcesIndex = normalized.IndexOf(resourcesPrefix, StringComparison.OrdinalIgnoreCase);
+        if (resourcesIndex >= 0)
+        {
+            return normalized[(resourcesIndex + resourcesPrefix.Length)..];
+        }
+
+        return normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ? null : normalized;
+    }
+
+    private Vector3 GetConiferLocalPosition(
+        double[,] heightmap,
+        TileObjectPlacement placement,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        int heightResolution = heightmap.GetLength(0);
+        int widthResolution = heightmap.GetLength(1);
+        float normalizedX = widthResolution > 1
+            ? Mathf.Clamp01((float)(placement.X / (widthResolution - 1)))
+            : 0f;
+        float normalizedY = heightResolution > 1
+            ? Mathf.Clamp01((float)(placement.Y / (heightResolution - 1)))
+            : 0f;
+
+        float localX = normalizedX * terrainWidth;
+        float localZ = (1f - normalizedY) * terrainLength;
+        float localY = SampleTerrainHeight(heightmap, placement.X, placement.Y, normalizationMinHeight, normalizationMaxHeight) +
+                       coniferVerticalOffset;
+        return new Vector3(localX, localY, localZ);
+    }
+
+    private float SampleTerrainHeight(
+        double[,] heightmap,
+        double sampleX,
+        double sampleY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        double rawHeight = SampleHeightmapBilinear(heightmap, sampleX, sampleY);
+        double normalizationRange = Math.Max(normalizationMaxHeight - normalizationMinHeight, 1e-6);
+        float normalizedHeight = Mathf.Clamp01((float)((rawHeight - normalizationMinHeight) / normalizationRange));
+        return normalizedHeight * terrainHeight;
+    }
+
+    private static double SampleHeightmapBilinear(double[,] heightmap, double sampleX, double sampleY)
+    {
+        int height = heightmap.GetLength(0);
+        int width = heightmap.GetLength(1);
+        if (height == 0 || width == 0)
+        {
+            return 0d;
+        }
+
+        double clampedX = Math.Clamp(sampleX, 0d, width - 1d);
+        double clampedY = Math.Clamp(sampleY, 0d, height - 1d);
+        int x0 = (int)Math.Floor(clampedX);
+        int y0 = (int)Math.Floor(clampedY);
+        int x1 = Math.Min(x0 + 1, width - 1);
+        int y1 = Math.Min(y0 + 1, height - 1);
+        double tx = clampedX - x0;
+        double ty = clampedY - y0;
+
+        double h00 = heightmap[y0, x0];
+        double h10 = heightmap[y0, x1];
+        double h01 = heightmap[y1, x0];
+        double h11 = heightmap[y1, x1];
+        double hx0 = Lerp(h00, h10, tx);
+        double hx1 = Lerp(h01, h11, tx);
+        return Lerp(hx0, hx1, ty);
+    }
+
+    private static double Lerp(double a, double b, double t)
+    {
+        return a + (b - a) * t;
+    }
+
+    private static bool IsConiferPlacement(TileObjectPlacement placement)
+    {
+        return placement.Definition.NumericId == ConiferObjectNumericId ||
+               placement.Definition.Id.Equals(ConiferObjectId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void EnsureConiferDefinitionRegistered()
+    {
+        if (TileObjectRegistry.TryGet(ConiferObjectNumericId, out _) ||
+            TileObjectRegistry.TryGet(ConiferObjectId, out _))
+        {
+            return;
+        }
+
+        try
+        {
+            TileObjectRegistry.Register(
+                new TileObjectDefinition(
+                    ConiferObjectNumericId,
+                    ConiferObjectId,
+                    "Conifer",
+                    TileObjectCategory.Vegetation,
+                    new Rgba32(40, 110, 70, 255),
+                    prefabPath: DefaultConiferPrefabAssetPath,
+                    densityMultiplier: 1.0,
+                    vegetationCategory: "tree"));
+        }
+        catch (InvalidOperationException)
+        {
+            // Another loader may have registered the definition between the guard and the register call.
+        }
+    }
+
     private int GetGeneratedTerrainGroupId()
     {
         int instanceId = Mathf.Abs(GetInstanceID());
@@ -455,6 +745,14 @@ public sealed class TileLoader : MonoBehaviour
         colorByNormal ??= CreateDefaultColorByNormalGradient();
         blendByHeight ??= CreateDefaultBlendByHeightCurve();
         colorByHeight ??= CreateDefaultColorByHeightGradient();
+    }
+
+    private void EnsureVegetationDefaults()
+    {
+        if (string.IsNullOrWhiteSpace(generatedVegetationContainerName))
+        {
+            generatedVegetationContainerName = "Vegetation";
+        }
     }
 
     private static Gradient CloneGradient(Gradient source)
@@ -721,7 +1019,7 @@ public sealed class TileLoader : MonoBehaviour
                 globalMaxHeight = elevation[y][x];
             }
 
-            if (TryGetObject(pointData, "river_direction", out object riverObject))
+            if (TryGetObject(pointData, "river_direction", out object? riverObject))
             {
                 IReadOnlyDictionary<string, object> riverData = TryGetDictionary(riverObject);
                 riverDirection[y][x] = new RiverRasterization.RiverDirectionInfo
@@ -733,17 +1031,17 @@ public sealed class TileLoader : MonoBehaviour
                 };
             }
 
-            if (TryGetObject(pointData, "sea_current", out object seaCurrent))
+            if (TryGetObject(pointData, "sea_current", out object? seaCurrent))
             {
                 seaCurrents[y][x] = ConvertToDouble(seaCurrent, 0d);
             }
 
-            if (TryGetObject(pointData, "heightmap_type", out object typeObject))
+            if (TryGetObject(pointData, "heightmap_type", out object? typeObject))
             {
                 heightmapType[y][x] = ConvertToInt(typeObject, 0);
             }
 
-            if (TryGetObject(pointData, "water_direction", out object directionObject))
+            if (TryGetObject(pointData, "water_direction", out object? directionObject))
             {
                 waterDirection[y][x] = ToStringArray(directionObject);
             }
@@ -873,7 +1171,7 @@ public sealed class TileLoader : MonoBehaviour
         return new Dictionary<string, object>(StringComparer.Ordinal);
     }
 
-    private static IReadOnlyDictionary<string, object> TryGetDictionary(object value)
+    private static IReadOnlyDictionary<string, object> TryGetDictionary(object? value)
     {
         if (value is IReadOnlyDictionary<string, object> readOnlyStringDict)
         {
@@ -910,12 +1208,12 @@ public sealed class TileLoader : MonoBehaviour
         return new Dictionary<string, object>(StringComparer.Ordinal);
     }
 
-    private static object GetValue(IReadOnlyDictionary<string, object> source, string key, object fallback)
+    private static object? GetValue(IReadOnlyDictionary<string, object> source, string key, object? fallback)
     {
         return source != null && source.TryGetValue(key, out object value) ? value : fallback;
     }
 
-    private static bool TryGetObject(IReadOnlyDictionary<string, object> source, string key, out object value)
+    private static bool TryGetObject(IReadOnlyDictionary<string, object> source, string key, out object? value)
     {
         if (source != null && source.TryGetValue(key, out value))
         {
@@ -960,7 +1258,7 @@ public sealed class TileLoader : MonoBehaviour
         return false;
     }
 
-    private static int ConvertToInt(object value, int fallback)
+    private static int ConvertToInt(object? value, int fallback)
     {
         try
         {
@@ -972,7 +1270,7 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
-    private static double ConvertToDouble(object value, double fallback)
+    private static double ConvertToDouble(object? value, double fallback)
     {
         try
         {
@@ -984,7 +1282,7 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
-    private static Dictionary<string, double> ToDoubleDictionary(object value)
+    private static Dictionary<string, double> ToDoubleDictionary(object? value)
     {
         IReadOnlyDictionary<string, object> dictionary = TryGetDictionary(value);
         var result = new Dictionary<string, double>(StringComparer.Ordinal);
@@ -996,7 +1294,7 @@ public sealed class TileLoader : MonoBehaviour
         return result;
     }
 
-    private static string[] ToStringArray(object value)
+    private static string[] ToStringArray(object? value)
     {
         if (value is string[] stringArray)
         {

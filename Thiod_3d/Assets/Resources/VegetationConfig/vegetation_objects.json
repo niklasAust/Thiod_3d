@@ -1,0 +1,258 @@
+{
+    "vegetation.conifer": {
+        "name": "Conifer Tree",
+        "category": "Vegetation",
+        "vegetationCategory": "tree",
+        "prefab": "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab",
+        "prefabs": [
+            {
+                "path": "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab",
+                "probability": 1.0
+            }
+        ],
+        "previewColour": "#228B22"
+    },
+    "vegetation.big_tree": {
+        "name": "Big Tree",
+        "category": "Vegetation",
+        "vegetationCategory": "tree",
+        "prefab": "Prefabs/Vegetation/deciduous_forest/Tree_Birch_Big_1.prefab",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Birch_Big_1.prefab",
+                "probability": 0.1
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Beech_Big.prefab",
+                "probability": 0.85
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Oak_Big.prefab",
+                "probability": 0.05
+            }
+        ],
+        "previewColour": "#228B22"
+    },
+    "vegetation.bush": {
+        "name": "Bush",
+        "category": "Vegetation",
+        "vegetationCategory": "understory",
+        "prefab": "Prefabs/Vegetation/deciduous_forest/Bush3.prefab",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Bush3.prefab",
+                "probability": 0.5
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Bush4.prefab",
+                "probability": 0.3
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Bush7.prefab",
+                "probability": 0.2
+            }
+        ],
+        "previewColour": "#556B2F"
+    },
+    "vegetation.stone": {
+        "name": "Stone",
+        "category": "Decoration",
+        "vegetationCategory": "debris",
+        "itemId": "stone",
+        "previewColour": "#808080"
+    },
+    "vegetation.branch": {
+        "name": "Branch",
+        "category": "Decoration",
+        "vegetationCategory": "debris",
+        "itemId": "branch",
+        "previewColour": "#A67C52"
+    },
+    "vegetation.long_branch": {
+        "name": "Long Branch",
+        "category": "Decoration",
+        "vegetationCategory": "debris",
+        "itemId": "long_branch",
+        "previewColour": "#8B6A45"
+    },
+    "vegetation.small_log": {
+        "name": "Small Log",
+        "category": "Decoration",
+        "vegetationCategory": "debris",
+        "itemId": "small_log",
+        "previewColour": "#6F4B2A"
+    },
+    "vegetation.flint": {
+        "name": "Flint",
+        "category": "Decoration",
+        "vegetationCategory": "debris",
+        "itemId": "flint",
+        "previewColour": "#6E7480"
+    },
+    "vegetation.herb": {
+        "name": "Forest Herb",
+        "category": "Vegetation",
+        "vegetationCategory": "understory",
+        "prefab": "Prefabs/Vegetation/deciduous_forest/Bush5.prefab",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Bush.prefab",
+                "probability": 0.5
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Bush5.prefab",
+                "probability": 0.3
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Bush2.prefab",
+                "probability": 0.2
+            }
+        ],
+        "previewColour": "#6DAA2C"
+    },
+    "vegetation.reed": {
+        "name": "Wetland Reed",
+        "category": "Vegetation",
+        "vegetationCategory": "edge",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/riparian/reeds_1.prefab",
+                "probability": 0.3
+            },
+            {
+                "path": "Prefabs/Vegetation/riparian/reeds_2.prefab",
+                "probability": 0.3
+            },
+            {
+                "path": "Prefabs/Vegetation/riparian/reeds_3.prefab",
+                "probability": 0.3
+            }
+        ],
+        "previewColour": "#3F7F3F"
+    },
+    "vegetation.willow": {
+        "name": "Willows",
+        "category": "Vegetation",
+        "vegetationCategory": "edge",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/riparian/willow_1.prefab",
+                "probability": 1.0
+            },
+            {
+                "path": "Prefabs/Vegetation/riparian/willow_2.prefab",
+                "probability": 0.0
+            }
+        ],
+        "previewColour": "#3F7F3F"
+    },
+    "vegetation.oak": {
+        "name": "Oak",
+        "category": "Vegetation",
+        "vegetationCategory": "tree",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Oak_Big_1.prefab",
+                "probability": 0.1
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Oak_Normal.prefab",
+                "probability": 0.9
+            }
+        ],
+        "previewColour": "#228B22"
+    },
+    "vegetation.beech": {
+        "name": "Beech",
+        "category": "Vegetation",
+        "vegetationCategory": "tree",
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Beech_Big_1.prefab",
+                "probability": 0.1
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Beech_Medium_1.prefab",
+                "probability": 0.7
+            },
+            {
+                "path": "Prefabs/Vegetation/deciduous_forest/Tree_Beech_Small_1.prefab",
+                "probability": 0.2
+            }
+        ],
+        "previewColour": "#228B22"
+    },
+    "groundcover.dirt": {
+        "name": "Dirt Patch",
+        "category": "Vegetation",
+        "vegetationCategory": "ground",
+        "layer": 0,
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/groundcover/dirt_big.prefab",
+                "probability": 0.2
+            },
+            {
+                "path": "Prefabs/Vegetation/groundcover/dirt_small.prefab",
+                "probability": 0.8
+            }
+        ],
+        "previewColour": "#3F7F3F"
+    },
+    "groundcover.grass": {
+        "name": "Grass Patch",
+        "category": "Vegetation",
+        "vegetationCategory": "ground",
+        "layer": 0,
+        "prefabs": [
+            {
+                "path": "Prefabs/Vegetation/groundcover/grass_big.prefab",
+                "probability": 0.33
+            },
+            {
+                "path": "Prefabs/Vegetation/groundcover/grass_big_2.prefab",
+                "probability": 0.33
+            },
+            {
+                "path": "Prefabs/Vegetation/groundcover/grass_big_3.prefab",
+                "probability": 0.33
+            }
+        ],
+        "previewColour": "#3F7F3F"
+    },
+    "prefab.yarrow_cluster": {
+        "name": "yarrow cluster",
+        "category": "Vegetation",
+        "vegetationCategory": "understory",
+        "prefab": "Prefabs/Vegetation/coniferous_forest/yarrow_cluster.prefab",
+        "previewColour": "#FF8BFF"
+    },
+    "prefab.young_coniferous_trees": {
+        "name": "young coniferous tree cluster",
+        "category": "Vegetation",
+        "vegetationCategory": "understory",
+        "prefab": "Prefabs/Vegetation/coniferous_forest/young_coniferous_tree_cluster.prefab",
+        "previewColour": "#008BFF"
+    },
+    "prefab.grass_cluster": {
+        "name": "grass cluster",
+        "category": "Vegetation",
+        "vegetationCategory": "understory",
+        "prefab": "Prefabs/Vegetation/coniferous_forest/GrassCluster.prefab",
+        "previewColour": "#55FF55"
+    },
+    "vegetation.blueberry_bush": {
+        "name": "Blueberry Bush",
+        "category": "Vegetation",
+        "vegetationCategory": "understory",
+        "prefab": "Prefabs/Vegetation/coniferous_forest/blueberry_bush.prefab",
+        "previewColour": "#4B7BEC"
+    },
+    "vegetation.nettle": {
+        "name": "Nettle Patch",
+        "category": "Vegetation",
+        "vegetationCategory": "nettle",
+        "prefab": "Prefabs/Vegetation/Nettle.prefab",
+        "previewColour": "#79B24A"
+    }
+}

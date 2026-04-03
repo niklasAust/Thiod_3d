@@ -128,7 +128,7 @@ Material:
     - _Emissive_Amount: 0
     - _Enable_Breeze: 1
     - _Enable_Emission: 0
-    - _Enable_Frosting: 1
+    - _Enable_Frosting: 0
     - _Enable_Leaf_Normal: 1
     - _Enable_Light_Wind: 1
     - _Enable_Pulse: 0
@@ -201,7 +201,7 @@ Material:
     - _UVSec: 0
     - _Use_Color_Noise: 0
     - _Use_Global_Weather_Controller: 0
-    - _Use_Vertex_Color_Wind: 1
+    - _Use_Vertex_Color_Wind: 0
     - _WindBaseline: 0
     - _WindDirection: 0
     - _Wind_Twist_Strength: 0.15
