@@ -46,7 +46,7 @@ public sealed class TileLoader : MonoBehaviour
     {
         hasLoadedInCurrentEnableCycle = false;
 
-        if (!Application.isPlaying && loadOnEnableInEditMode)
+        if (ShouldLoadOnEnableInEditMode())
         {
             LoadTileIntoScene();
         }
@@ -101,6 +101,45 @@ public sealed class TileLoader : MonoBehaviour
             Debug.LogException(ex, this);
         }
 #endif
+    }
+
+    private bool ShouldLoadOnEnableInEditMode()
+    {
+        if (Application.isPlaying || !loadOnEnableInEditMode)
+        {
+            return false;
+        }
+
+#if UNITY_EDITOR
+        if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode)
+        {
+            return false;
+        }
+#endif
+
+        // Exiting play mode re-enables this ExecuteAlways component in edit mode.
+        // If generated terrains already exist in the scene, avoid destroying and
+        // rebuilding them immediately because Griffin can throw during OnDisable.
+        if (HasGeneratedTerrains())
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool HasGeneratedTerrains()
+    {
+        foreach (Transform child in transform)
+        {
+            if (child != null &&
+                (child.name == generatedTerrainName || child.name.StartsWith(generatedTerrainName + "_", StringComparison.Ordinal)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
 #if GRIFFIN
@@ -186,7 +225,19 @@ public sealed class TileLoader : MonoBehaviour
 
         for (int i = 0; i < toRemove.Count; i++)
         {
-            DestroyImmediate(toRemove[i].gameObject);
+            if (toRemove[i] == null)
+            {
+                continue;
+            }
+
+            if (Application.isPlaying)
+            {
+                Destroy(toRemove[i].gameObject);
+            }
+            else
+            {
+                DestroyImmediate(toRemove[i].gameObject);
+            }
         }
     }
 
@@ -288,7 +339,14 @@ public sealed class TileLoader : MonoBehaviour
             return material;
         }
 
-        DestroyImmediate(material);
+        if (Application.isPlaying)
+        {
+            Destroy(material);
+        }
+        else
+        {
+            DestroyImmediate(material);
+        }
         Debug.LogWarning($"TileLoader could not initialize a Polaris material for {texturingModel}; falling back to URP Lit.", this);
         return CreateFallbackTerrainMaterial();
     }
