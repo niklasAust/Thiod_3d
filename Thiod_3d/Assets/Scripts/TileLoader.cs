@@ -36,6 +36,9 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float terrainHeight = 30f;
     [SerializeField] private int terrainGridSize = 16;
     [SerializeField] private TerrainShadingMode terrainShadingMode = TerrainShadingMode.PolarisGradientLookup;
+    [SerializeField] private Gradient colorByNormal = CreateDefaultColorByNormalGradient();
+    [SerializeField] private AnimationCurve blendByHeight = CreateDefaultBlendByHeightCurve();
+    [SerializeField] private Gradient colorByHeight = CreateDefaultColorByHeightGradient();
 
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
@@ -60,11 +63,44 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
+    private void OnValidate()
+    {
+#if GRIFFIN
+        EnsureShadingDefaults();
+        ApplyShadingToGeneratedTerrains();
+#endif
+    }
+
     [ContextMenu("Update Terrain")]
     public void UpdateTerrain()
     {
         hasLoadedInCurrentEnableCycle = false;
         LoadTileIntoScene();
+    }
+
+    [ContextMenu("Apply Shading To Generated Terrains")]
+    public void ApplyShadingToGeneratedTerrains()
+    {
+#if !GRIFFIN
+        return;
+#else
+        if (terrainShadingMode != TerrainShadingMode.PolarisGradientLookup)
+        {
+            return;
+        }
+
+        foreach (GStylizedTerrain terrain in GetGeneratedTerrains())
+        {
+            if (terrain == null || terrain.TerrainData == null)
+            {
+                continue;
+            }
+
+            ApplyGradientLookupSettings(terrain.TerrainData.Shading);
+            terrain.TerrainData.Shading.UpdateLookupTextures();
+            terrain.TerrainData.Shading.UpdateMaterials();
+        }
+#endif
     }
 
     [ContextMenu("Load Demo Tile")]
@@ -306,6 +342,7 @@ public sealed class TileLoader : MonoBehaviour
     {
         if (terrainShadingMode == TerrainShadingMode.PolarisGradientLookup)
         {
+            ApplyGradientLookupSettings(terrainData.Shading);
             terrainData.Shading.UpdateLookupTextures();
         }
 
@@ -358,6 +395,19 @@ public sealed class TileLoader : MonoBehaviour
             : GTexturingModel.ColorMap;
     }
 
+    private void ApplyGradientLookupSettings(GShading shading)
+    {
+        if (shading == null)
+        {
+            return;
+        }
+
+        EnsureShadingDefaults();
+        shading.ColorByNormal = CloneGradient(colorByNormal);
+        shading.ColorBlendCurve = CloneCurve(blendByHeight);
+        shading.ColorByHeight = CloneGradient(colorByHeight);
+    }
+
     private void RebuildTerrainSeams(List<GStylizedTerrain> terrains)
     {
         GStylizedTerrain.ConnectAdjacentTiles();
@@ -376,6 +426,104 @@ public sealed class TileLoader : MonoBehaviour
     {
         int instanceId = Mathf.Abs(GetInstanceID());
         return instanceId == 0 ? 1 : instanceId;
+    }
+
+    private IEnumerable<GStylizedTerrain> GetGeneratedTerrains()
+    {
+        foreach (Transform child in transform)
+        {
+            if (child == null)
+            {
+                continue;
+            }
+
+            if (child.name != generatedTerrainName &&
+                !child.name.StartsWith(generatedTerrainName + "_", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (child.TryGetComponent(out GStylizedTerrain terrain))
+            {
+                yield return terrain;
+            }
+        }
+    }
+
+    private void EnsureShadingDefaults()
+    {
+        colorByNormal ??= CreateDefaultColorByNormalGradient();
+        blendByHeight ??= CreateDefaultBlendByHeightCurve();
+        colorByHeight ??= CreateDefaultColorByHeightGradient();
+    }
+
+    private static Gradient CloneGradient(Gradient source)
+    {
+        if (source == null)
+        {
+            return new Gradient();
+        }
+
+        var clone = new Gradient();
+        clone.SetKeys(source.colorKeys, source.alphaKeys);
+        clone.mode = source.mode;
+        return clone;
+    }
+
+    private static AnimationCurve CloneCurve(AnimationCurve source)
+    {
+        if (source == null)
+        {
+            return new AnimationCurve();
+        }
+
+        return new AnimationCurve(source.keys);
+    }
+
+    private static Gradient CreateDefaultColorByNormalGradient()
+    {
+        var gradient = new Gradient();
+        gradient.SetKeys(
+            new[]
+            {
+                new GradientColorKey(new Color(0.18f, 0.24f, 0.16f), 0f),
+                new GradientColorKey(new Color(0.48f, 0.46f, 0.38f), 0.45f),
+                new GradientColorKey(new Color(0.78f, 0.77f, 0.74f), 1f),
+            },
+            new[]
+            {
+                new GradientAlphaKey(1f, 0f),
+                new GradientAlphaKey(1f, 1f),
+            });
+        return gradient;
+    }
+
+    private static Gradient CreateDefaultColorByHeightGradient()
+    {
+        var gradient = new Gradient();
+        gradient.SetKeys(
+            new[]
+            {
+                new GradientColorKey(new Color(0.21f, 0.33f, 0.19f), 0f),
+                new GradientColorKey(new Color(0.34f, 0.47f, 0.24f), 0.28f),
+                new GradientColorKey(new Color(0.53f, 0.48f, 0.37f), 0.62f),
+                new GradientColorKey(new Color(0.9f, 0.92f, 0.95f), 1f),
+            },
+            new[]
+            {
+                new GradientAlphaKey(1f, 0f),
+                new GradientAlphaKey(1f, 1f),
+            });
+        return gradient;
+    }
+
+    private static AnimationCurve CreateDefaultBlendByHeightCurve()
+    {
+        return new AnimationCurve(
+            new Keyframe(0f, 0.18f, 0f, 0.5f),
+            new Keyframe(0.45f, 0.4f, 0.5f, 0.5f),
+            new Keyframe(0.75f, 0.72f, 0.5f, 0.5f),
+            new Keyframe(1f, 1f, 0.5f, 0f));
     }
 
     private static Material CreateFallbackTerrainMaterial()
