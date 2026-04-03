@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Rendering;
 using WorldGen;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -55,10 +56,24 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private string generatedVegetationContainerName = "Vegetation";
     [SerializeField] private float coniferVerticalOffset = 0f;
 
+    [Header("Vegetation Optimization")]
+    [SerializeField] private bool optimizeConifersByDistance = true;
+    [SerializeField] private Transform? coniferOptimizationTarget;
+    [SerializeField] private float fullConiferDistance = 80f;
+    [SerializeField] private float reducedConiferDistance = 160f;
+    [SerializeField] private float lowDetailConiferDistance = 280f;
+    [SerializeField] private float culledConiferDistance = 420f;
+    [SerializeField] private float coniferOptimizationInterval = 0.25f;
+    [SerializeField] private bool disableDistantConiferColliders = true;
+    [SerializeField] private bool disableDistantConiferShadows = true;
+
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
 
     private bool hasLoadedInCurrentEnableCycle;
+    private bool coniferOptimizationWasActive;
+    private float nextConiferOptimizationTime;
+    private readonly List<GeneratedConiferInstance> generatedConiferInstances = new();
 
     private void OnEnable()
     {
@@ -76,6 +91,34 @@ public sealed class TileLoader : MonoBehaviour
         {
             LoadTileIntoScene();
         }
+    }
+
+    private void Update()
+    {
+        if (!Application.isPlaying)
+        {
+            return;
+        }
+
+        if (!optimizeConifersByDistance)
+        {
+            if (coniferOptimizationWasActive)
+            {
+                ApplyConiferOptimizationToAll(ConiferOptimizationTier.Full);
+                coniferOptimizationWasActive = false;
+            }
+
+            return;
+        }
+
+        coniferOptimizationWasActive = true;
+        if (Time.unscaledTime < nextConiferOptimizationTime)
+        {
+            return;
+        }
+
+        nextConiferOptimizationTime = Time.unscaledTime + Mathf.Max(0.05f, coniferOptimizationInterval);
+        UpdateConiferOptimization();
     }
 
     private void OnValidate()
@@ -263,11 +306,17 @@ public sealed class TileLoader : MonoBehaviour
         {
             RebuildTerrainSeams(createdTerrains);
             PopulateVegetation(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
+            if (Application.isPlaying)
+            {
+                UpdateConiferOptimization(forceFullIfNoTarget: true);
+            }
         }
     }
 
     private void ClearGeneratedTerrains()
     {
+        generatedConiferInstances.Clear();
+        nextConiferOptimizationTime = 0f;
         var toRemove = new List<Transform>();
         foreach (Transform child in transform)
         {
@@ -501,6 +550,7 @@ public sealed class TileLoader : MonoBehaviour
                 normalizationMaxHeight);
             instance.transform.localRotation = Quaternion.identity;
             instance.transform.localScale = Vector3.one;
+            RegisterGeneratedConifer(instance);
         }
     }
 
@@ -679,6 +729,267 @@ public sealed class TileLoader : MonoBehaviour
         return a + (b - a) * t;
     }
 
+    private void RegisterGeneratedConifer(GameObject instance)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        generatedConiferInstances.Add(new GeneratedConiferInstance(instance));
+    }
+
+    private void UpdateConiferOptimization(bool forceFullIfNoTarget = false)
+    {
+        generatedConiferInstances.RemoveAll(instance => instance.Root == null);
+        if (generatedConiferInstances.Count == 0)
+        {
+            return;
+        }
+
+        Transform? target = ResolveConiferOptimizationTarget();
+        if (target == null)
+        {
+            if (forceFullIfNoTarget)
+            {
+                ApplyConiferOptimizationToAll(ConiferOptimizationTier.Full);
+            }
+
+            return;
+        }
+
+        float fullDistanceSq = fullConiferDistance * fullConiferDistance;
+        float reducedDistanceSq = reducedConiferDistance * reducedConiferDistance;
+        float lowDetailDistanceSq = lowDetailConiferDistance * lowDetailConiferDistance;
+
+        for (int i = 0; i < generatedConiferInstances.Count; i++)
+        {
+            GeneratedConiferInstance instance = generatedConiferInstances[i];
+            float sqrDistance = (instance.Transform.position - target.position).sqrMagnitude;
+            ConiferOptimizationTier tier = DetermineConiferTier(
+                sqrDistance,
+                fullDistanceSq,
+                reducedDistanceSq,
+                lowDetailDistanceSq);
+            ApplyConiferOptimization(instance, tier);
+        }
+    }
+
+    private void ApplyConiferOptimizationToAll(ConiferOptimizationTier tier)
+    {
+        generatedConiferInstances.RemoveAll(instance => instance.Root == null);
+        for (int i = 0; i < generatedConiferInstances.Count; i++)
+        {
+            ApplyConiferOptimization(generatedConiferInstances[i], tier);
+        }
+    }
+
+    private ConiferOptimizationTier DetermineConiferTier(
+        float sqrDistance,
+        float fullDistanceSq,
+        float reducedDistanceSq,
+        float lowDetailDistanceSq)
+    {
+        float culledDistanceSq = culledConiferDistance * culledConiferDistance;
+        if (sqrDistance <= fullDistanceSq)
+        {
+            return ConiferOptimizationTier.Full;
+        }
+
+        if (sqrDistance <= reducedDistanceSq)
+        {
+            return ConiferOptimizationTier.Reduced;
+        }
+
+        if (sqrDistance <= lowDetailDistanceSq)
+        {
+            return ConiferOptimizationTier.LowDetail;
+        }
+
+        return sqrDistance <= culledDistanceSq
+            ? ConiferOptimizationTier.LowDetail
+            : ConiferOptimizationTier.Culled;
+    }
+
+    private void ApplyConiferOptimization(GeneratedConiferInstance instance, ConiferOptimizationTier tier)
+    {
+        if (instance.Root == null || instance.CurrentTier == tier)
+        {
+            return;
+        }
+
+        if (tier == ConiferOptimizationTier.Culled)
+        {
+            instance.Root.SetActive(false);
+            instance.CurrentTier = tier;
+            return;
+        }
+
+        if (!instance.Root.activeSelf)
+        {
+            instance.Root.SetActive(true);
+        }
+
+        switch (tier)
+        {
+            case ConiferOptimizationTier.Full:
+                SetConiferLodObjects(instance, activeLodIndex: null);
+                SetConiferLodGroupEnabled(instance, true);
+                SetConiferCollidersEnabled(instance, true);
+                RestoreConiferRendererState(instance);
+                break;
+            case ConiferOptimizationTier.Reduced:
+                SetConiferLodObjects(instance, activeLodIndex: null);
+                SetConiferLodGroupEnabled(instance, true);
+                SetConiferCollidersEnabled(instance, !disableDistantConiferColliders);
+                if (disableDistantConiferShadows)
+                {
+                    SetConiferShadowsEnabled(instance, false);
+                }
+                else
+                {
+                    RestoreConiferRendererState(instance);
+                }
+
+                break;
+            case ConiferOptimizationTier.LowDetail:
+                SetConiferLodObjects(instance, activeLodIndex: instance.LowestAvailableLodIndex);
+                SetConiferLodGroupEnabled(instance, false);
+                SetConiferCollidersEnabled(instance, false);
+                if (disableDistantConiferShadows)
+                {
+                    SetConiferShadowsEnabled(instance, false);
+                }
+                else
+                {
+                    RestoreConiferRendererState(instance);
+                }
+
+                break;
+        }
+
+        instance.CurrentTier = tier;
+    }
+
+    private static void SetConiferLodGroupEnabled(GeneratedConiferInstance instance, bool enabled)
+    {
+        if (instance.LodGroup != null)
+        {
+            instance.LodGroup.enabled = enabled;
+        }
+    }
+
+    private static void SetConiferCollidersEnabled(GeneratedConiferInstance instance, bool enabled)
+    {
+        for (int i = 0; i < instance.Colliders.Length; i++)
+        {
+            Collider collider = instance.Colliders[i];
+            if (collider != null)
+            {
+                collider.enabled = enabled;
+            }
+        }
+    }
+
+    private static void SetConiferLodObjects(GeneratedConiferInstance instance, int? activeLodIndex)
+    {
+        GameObject?[] lodObjects = instance.LodObjects;
+        if (lodObjects.Length == 0)
+        {
+            return;
+        }
+
+        for (int i = 0; i < lodObjects.Length; i++)
+        {
+            GameObject? lodObject = lodObjects[i];
+            if (lodObject == null)
+            {
+                continue;
+            }
+
+            bool shouldBeActive = !activeLodIndex.HasValue || i == activeLodIndex.Value;
+            if (lodObject.activeSelf != shouldBeActive)
+            {
+                lodObject.SetActive(shouldBeActive);
+            }
+        }
+    }
+
+    private static void SetConiferShadowsEnabled(GeneratedConiferInstance instance, bool enabled)
+    {
+        for (int i = 0; i < instance.Renderers.Length; i++)
+        {
+            Renderer renderer = instance.Renderers[i];
+            if (renderer == null)
+            {
+                continue;
+            }
+
+            renderer.shadowCastingMode = enabled
+                ? instance.OriginalShadowCastingModes[i]
+                : ShadowCastingMode.Off;
+            renderer.receiveShadows = enabled && instance.OriginalReceiveShadows[i];
+        }
+    }
+
+    private static void RestoreConiferRendererState(GeneratedConiferInstance instance)
+    {
+        for (int i = 0; i < instance.Renderers.Length; i++)
+        {
+            Renderer renderer = instance.Renderers[i];
+            if (renderer == null)
+            {
+                continue;
+            }
+
+            renderer.shadowCastingMode = instance.OriginalShadowCastingModes[i];
+            renderer.receiveShadows = instance.OriginalReceiveShadows[i];
+        }
+    }
+
+    private Transform? ResolveConiferOptimizationTarget()
+    {
+        if (coniferOptimizationTarget != null && coniferOptimizationTarget.gameObject.scene.IsValid())
+        {
+            return coniferOptimizationTarget;
+        }
+
+        if (TryFindSceneTransformWithComponent("CharacterLocomotion", out Transform? locomotionTransform))
+        {
+            coniferOptimizationTarget = locomotionTransform;
+            return coniferOptimizationTarget;
+        }
+
+        if (Camera.main != null)
+        {
+            return Camera.main.transform;
+        }
+
+        return null;
+    }
+
+    private static bool TryFindSceneTransformWithComponent(string componentTypeName, out Transform? result)
+    {
+        Transform[] transforms = FindObjectsByType<Transform>(FindObjectsSortMode.None);
+        for (int i = 0; i < transforms.Length; i++)
+        {
+            Transform transform = transforms[i];
+            if (transform == null || !transform.gameObject.scene.IsValid())
+            {
+                continue;
+            }
+
+            if (transform.GetComponent(componentTypeName) != null)
+            {
+                result = transform;
+                return true;
+            }
+        }
+
+        result = null;
+        return false;
+    }
+
     private static bool IsConiferPlacement(TileObjectPlacement placement)
     {
         return placement.Definition.NumericId == ConiferObjectNumericId ||
@@ -753,6 +1064,12 @@ public sealed class TileLoader : MonoBehaviour
         {
             generatedVegetationContainerName = "Vegetation";
         }
+
+        fullConiferDistance = Mathf.Max(0f, fullConiferDistance);
+        reducedConiferDistance = Mathf.Max(fullConiferDistance, reducedConiferDistance);
+        lowDetailConiferDistance = Mathf.Max(reducedConiferDistance, lowDetailConiferDistance);
+        culledConiferDistance = Mathf.Max(lowDetailConiferDistance, culledConiferDistance);
+        coniferOptimizationInterval = Mathf.Max(0.05f, coniferOptimizationInterval);
     }
 
     private static Gradient CloneGradient(Gradient source)
@@ -1312,6 +1629,83 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         return Array.Empty<string>();
+    }
+
+    private enum ConiferOptimizationTier
+    {
+        Unknown = 0,
+        Full = 1,
+        Reduced = 2,
+        LowDetail = 3,
+        Culled = 4,
+    }
+
+    private sealed class GeneratedConiferInstance
+    {
+        public GeneratedConiferInstance(GameObject root)
+        {
+            Root = root;
+            Transform = root.transform;
+            LodGroup = root.GetComponent<LODGroup>();
+            Colliders = root.GetComponentsInChildren<Collider>(true);
+            Renderers = root.GetComponentsInChildren<Renderer>(true);
+            OriginalShadowCastingModes = new ShadowCastingMode[Renderers.Length];
+            OriginalReceiveShadows = new bool[Renderers.Length];
+            for (int i = 0; i < Renderers.Length; i++)
+            {
+                Renderer renderer = Renderers[i];
+                OriginalShadowCastingModes[i] = renderer.shadowCastingMode;
+                OriginalReceiveShadows[i] = renderer.receiveShadows;
+            }
+
+            LodObjects = ExtractLodObjects(LodGroup);
+            LowestAvailableLodIndex = FindLowestAvailableLodIndex(LodObjects);
+        }
+
+        public GameObject Root { get; }
+        public Transform Transform { get; }
+        public LODGroup? LodGroup { get; }
+        public Collider[] Colliders { get; }
+        public Renderer[] Renderers { get; }
+        public ShadowCastingMode[] OriginalShadowCastingModes { get; }
+        public bool[] OriginalReceiveShadows { get; }
+        public GameObject?[] LodObjects { get; }
+        public int? LowestAvailableLodIndex { get; }
+        public ConiferOptimizationTier CurrentTier { get; set; }
+
+        private static GameObject?[] ExtractLodObjects(LODGroup? lodGroup)
+        {
+            if (lodGroup == null)
+            {
+                return Array.Empty<GameObject?>();
+            }
+
+            LOD[] lods = lodGroup.GetLODs();
+            var lodObjects = new GameObject?[lods.Length];
+            for (int i = 0; i < lods.Length; i++)
+            {
+                Renderer[] renderers = lods[i].renderers;
+                if (renderers != null && renderers.Length > 0 && renderers[0] != null)
+                {
+                    lodObjects[i] = renderers[0].gameObject;
+                }
+            }
+
+            return lodObjects;
+        }
+
+        private static int? FindLowestAvailableLodIndex(GameObject?[] lodObjects)
+        {
+            for (int i = lodObjects.Length - 1; i >= 0; i--)
+            {
+                if (lodObjects[i] != null)
+                {
+                    return i;
+                }
+            }
+
+            return null;
+        }
     }
 
     private readonly struct LoadedWorldData
