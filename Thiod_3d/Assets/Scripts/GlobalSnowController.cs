@@ -53,4 +53,11 @@ public class GlobalSnowController : MonoBehaviour
         Shader.SetGlobalFloat(GlobalSnowHeightOffsetId, m_SnowHeightOffset);
         Shader.SetGlobalFloat(GlobalSnowEmissionMultiplierId, m_SnowEmissionMultiplier);
     }
+
+    public void SetWeatherDrivenSnow(float amount)
+    {
+        m_SnowAmount = Mathf.Clamp01(amount);
+        m_SnowEnabled = m_SnowAmount > 0.001f;
+        Apply();
+    }
 }

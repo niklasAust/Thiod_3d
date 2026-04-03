@@ -141,8 +141,8 @@ Material:
     - _FrostingHeight: 12.5
     - _FrostingSwitch: 1
     - _FrostingWorldObjectSwitch2: 0
-    - _Frosting_Falloff: 1.6
-    - _Frosting_Height: 12.5
+    - _Frosting_Falloff: 1
+    - _Frosting_Height: 12
     - _Frosting_Use_World_Normals: 0
     - _Gale_Bend: 1
     - _GlossMapScale: 1
@@ -201,7 +201,7 @@ Material:
     - _Trunk_Smoothness: 0.2
     - _UVSec: 0
     - _Use_Color_Noise: 0
-    - _Use_Global_Weather_Controller: 0
+    - _Use_Global_Weather_Controller: 1
     - _Use_Vertex_Color_Wind: 1
     - _WindBaseline: 0
     - _WindDirection: 0
@@ -224,7 +224,7 @@ Material:
     - _Emissive_Mask_Offset: {r: 0, g: 0, b: 0, a: 0}
     - _Emissive_Mask_Tiling: {r: 1, g: 1, b: 0, a: 0}
     - _FrostingColour: {r: 0.72156864, g: 0.7921569, b: 0.7921569, a: 0}
-    - _Frosting_Color: {r: 0.72156864, g: 0.7921569, b: 0.7921569, a: 0}
+    - _Frosting_Color: {r: 0.72156864, g: 0.7921569, b: 0.7921569, a: 1}
     - _GustHighlight: {r: 0.13505508, g: 0.1509434, b: 0.12887149, a: 0}
     - _LeafBaseColour: {r: 0, g: 0, b: 0, a: 0}
     - _LeafNoiseColour: {r: 0, g: 0, b: 0, a: 0}
