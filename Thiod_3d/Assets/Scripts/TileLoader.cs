@@ -68,6 +68,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float terrainHeight = 30f;
     [SerializeField] private int terrainGridSize = 16;
     [SerializeField] private TerrainShadingMode terrainShadingMode = TerrainShadingMode.PolarisTextureBlend;
+    [SerializeField] private string terrainDecalRenderingLayerName = "GroundDecals";
     [SerializeField] private Material? lowlandTerrainMaterial;
     [SerializeField] private Material? lowlandTerrainMaterialVariant;
     [SerializeField] private float lowlandTerrainTileSize = 24f;
@@ -133,6 +134,7 @@ public sealed class TileLoader : MonoBehaviour
     private float nextConiferOptimizationTime;
     private bool pendingRuntimeSeamRebuild;
     private int runtimeSeamRebuildFrame;
+    private bool hasWarnedMissingTerrainDecalRenderingLayer;
 #if UNITY_EDITOR
     private bool pendingEditorSeamRebuild;
 #endif
@@ -206,6 +208,7 @@ public sealed class TileLoader : MonoBehaviour
     private void OnValidate()
     {
         EnsureVegetationDefaults();
+        hasWarnedMissingTerrainDecalRenderingLayer = false;
 #if GRIFFIN
         EnsureShadingDefaults();
         ApplyShadingToGeneratedTerrains();
@@ -235,6 +238,7 @@ public sealed class TileLoader : MonoBehaviour
             ApplyTerrainShading(terrain);
             terrain.TerrainData.Shading.UpdateMaterials();
             ApplyWorldAlignedSplatMaterialOffsets(terrain);
+            ApplyTerrainDecalRenderingLayer(terrain);
         }
 #endif
     }
@@ -526,6 +530,7 @@ public sealed class TileLoader : MonoBehaviour
             tileHilliness);
         terrain.TerrainData.Shading.UpdateMaterials();
         ApplyWorldAlignedSplatMaterialOffsets(terrain);
+        ApplyTerrainDecalRenderingLayer(terrain);
 
         if (logHeightStats)
         {
@@ -652,6 +657,7 @@ public sealed class TileLoader : MonoBehaviour
             ApplyTerrainShading(terrain);
             terrain.TerrainData.Shading.UpdateMaterials();
             ApplyWorldAlignedSplatMaterialOffsets(terrain);
+            ApplyTerrainDecalRenderingLayer(terrain);
         }
     }
 
@@ -1149,6 +1155,54 @@ public sealed class TileLoader : MonoBehaviour
             new Vector2((terrainOrigin.x / safeTileSize) * sign.x, (terrainOrigin.z / safeTileSize) * sign.y) + phaseOffset);
     }
 
+    private void ApplyTerrainDecalRenderingLayer(GStylizedTerrain terrain)
+    {
+        if (terrain == null)
+        {
+            return;
+        }
+
+        uint terrainDecalRenderingLayerMask = GetTerrainDecalRenderingLayerMask();
+        if (terrainDecalRenderingLayerMask == 0u)
+        {
+            return;
+        }
+
+        GTerrainChunk[] chunks = terrain.GetChunks();
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            MeshRenderer? renderer = chunks[i]?.MeshRendererComponent;
+            if (renderer == null)
+            {
+                continue;
+            }
+
+            renderer.renderingLayerMask |= terrainDecalRenderingLayerMask;
+        }
+    }
+
+    private uint GetTerrainDecalRenderingLayerMask()
+    {
+        string layerName = string.IsNullOrWhiteSpace(terrainDecalRenderingLayerName)
+            ? string.Empty
+            : terrainDecalRenderingLayerName.Trim();
+        if (string.IsNullOrEmpty(layerName))
+        {
+            return 0u;
+        }
+
+        uint mask = RenderingLayerMask.GetMask(layerName);
+        if (mask == 0u && !hasWarnedMissingTerrainDecalRenderingLayer)
+        {
+            hasWarnedMissingTerrainDecalRenderingLayer = true;
+            Debug.LogWarning(
+                $"TileLoader could not find rendering layer '{layerName}'. Generated terrain chunks will not receive the ground decal rendering layer until it exists in URP Global Settings.",
+                this);
+        }
+
+        return mask;
+    }
+
     private static float SmoothRange(float value, float start, float blend)
     {
         return Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((value - start) / Mathf.Max(1e-4f, blend)));
@@ -1221,6 +1275,7 @@ public sealed class TileLoader : MonoBehaviour
             terrain.TerrainData.Geometry.SetRegionDirty(fullRegion);
             Polaris.UpdateTerrainMesh(terrain, new[] { fullRegion });
             terrain.TerrainData.Shading.UpdateMaterials();
+            ApplyTerrainDecalRenderingLayer(terrain);
         }
     }
 
