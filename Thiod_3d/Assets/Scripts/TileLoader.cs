@@ -22,8 +22,13 @@ public sealed class TileLoader : MonoBehaviour
 {
     private const int ConiferObjectNumericId = 22;
     private const string ConiferObjectId = "vegetation.conifer";
+    private const int GrassClusterObjectNumericId = 28;
+    private const string GrassClusterObjectId = "prefab.grass_cluster";
     private const string DefaultConiferPrefabAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab";
+    private const string DefaultGrassClusterPrefabAssetPath =
+        "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Tall_Clump_05.prefab";
+    private const string DefaultGrassClusterPrefabName = "SM_Env_Grass_Tall_Clump_05";
     private const string DefaultLowlandTerrainMaterialAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/grass01.mat";
     private const string DefaultLowlandTerrainMaterialVariantAssetPath =
@@ -100,8 +105,10 @@ public sealed class TileLoader : MonoBehaviour
 
     [Header("Vegetation Output")]
     [SerializeField] private bool placeConiferTrees = true;
+    [SerializeField] private bool placeGrassClusters = true;
     [SerializeField] private string generatedVegetationContainerName = "Vegetation";
     [SerializeField] private float coniferVerticalOffset = 0f;
+    [SerializeField] private float grassClusterVerticalOffset = 0f;
 
     [Header("Vegetation Optimization")]
     [SerializeField] private bool optimizeConifersByDistance = true;
@@ -113,6 +120,9 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float coniferOptimizationInterval = 0.25f;
     [SerializeField] private bool disableDistantConiferColliders = true;
     [SerializeField] private bool disableDistantConiferShadows = true;
+
+    [Header("Grass Surface Alignment")]
+    [SerializeField] private float grassClusterConformSurfaceOffset = -0.1f;
 
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
@@ -154,6 +164,7 @@ public sealed class TileLoader : MonoBehaviour
 
         if (Application.isPlaying && HasGeneratedTerrains())
         {
+            AlignExistingGeneratedGrassClusters();
             ScheduleRuntimeTerrainSeamRebuild();
         }
     }
@@ -254,6 +265,7 @@ public sealed class TileLoader : MonoBehaviour
             GenerationSettings settings = ResolveGenerationSettings(loadedWorldData.Metadata);
 
             EnsureConiferDefinitionRegistered();
+            EnsureGrassClusterDefinitionRegistered();
             var tileGenerator = new TileGenerator(loadedWorldData.WorldData, loadedWorldData.Seed);
             CreateOrUpdateTerrains(tileGenerator, loadedWorldData, settings);
             hasLoadedInCurrentEnableCycle = true;
@@ -1238,7 +1250,7 @@ public sealed class TileLoader : MonoBehaviour
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
-        if (!placeConiferTrees)
+        if (!placeConiferTrees && !placeGrassClusters)
         {
             return;
         }
@@ -1248,7 +1260,15 @@ public sealed class TileLoader : MonoBehaviour
         {
             GeneratedTerrainRequest request = terrainRequests[i];
             GStylizedTerrain terrain = terrains[i];
-            PopulateConiferTrees(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+            if (placeConiferTrees)
+            {
+                PopulateConiferTrees(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+            }
+
+            if (placeGrassClusters)
+            {
+                PopulateGrassClusters(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+            }
         }
     }
 
@@ -1286,14 +1306,60 @@ public sealed class TileLoader : MonoBehaviour
 
             instance.name = prefab.name;
             instance.transform.SetParent(vegetationContainer, false);
-            instance.transform.localPosition = GetConiferLocalPosition(
+            instance.transform.localPosition = GetPlacementLocalPosition(
+                request.Layers.Heightmap,
+                placement,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                coniferVerticalOffset);
+            instance.transform.localRotation = Quaternion.identity;
+            instance.transform.localScale = Vector3.one;
+            RegisterGeneratedConifer(instance);
+        }
+    }
+
+    private void PopulateGrassClusters(
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        if (terrain == null || request.Layers.PlacedObjects == null || request.Layers.PlacedObjects.Count == 0)
+        {
+            return;
+        }
+
+        Transform? vegetationContainer = null;
+        foreach (TileObjectPlacement placement in request.Layers.PlacedObjects)
+        {
+            if (!IsGrassClusterPlacement(placement))
+            {
+                continue;
+            }
+
+            GameObject? prefab = LoadPrefabForPlacement(placement);
+            if (prefab == null)
+            {
+                continue;
+            }
+
+            vegetationContainer ??= CreateVegetationContainer(terrain.transform);
+            GameObject? instance = InstantiatePlacementPrefab(prefab);
+            if (instance == null)
+            {
+                continue;
+            }
+
+            instance.name = prefab.name;
+            instance.transform.SetParent(vegetationContainer, false);
+            instance.transform.localScale = Vector3.one;
+            PlaceGrassClusterInstance(
+                instance.transform,
                 request.Layers.Heightmap,
                 placement,
                 normalizationMinHeight,
                 normalizationMaxHeight);
-            instance.transform.localRotation = Quaternion.identity;
-            instance.transform.localScale = Vector3.one;
-            RegisterGeneratedConifer(instance);
+            RegisterGeneratedGrassCluster(instance);
         }
     }
 
@@ -1405,26 +1471,129 @@ public sealed class TileLoader : MonoBehaviour
         return normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ? null : normalized;
     }
 
-    private Vector3 GetConiferLocalPosition(
+    private Vector3 GetPlacementLocalPosition(
+        double[,] heightmap,
+        TileObjectPlacement placement,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        float verticalOffset)
+    {
+        return GetTerrainLocalPoint(
+            heightmap,
+            placement.X,
+            placement.Y,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            verticalOffset);
+    }
+
+    private Vector3 GetTerrainLocalPoint(
+        double[,] heightmap,
+        double sampleX,
+        double sampleY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        float verticalOffset)
+    {
+        int heightResolution = heightmap.GetLength(0);
+        int widthResolution = heightmap.GetLength(1);
+        float normalizedX = widthResolution > 1
+            ? Mathf.Clamp01((float)(sampleX / (widthResolution - 1)))
+            : 0f;
+        float normalizedY = heightResolution > 1
+            ? Mathf.Clamp01((float)(sampleY / (heightResolution - 1)))
+            : 0f;
+
+        float localX = normalizedX * terrainWidth;
+        float localZ = (1f - normalizedY) * terrainLength;
+        float localY = SampleTerrainHeight(heightmap, sampleX, sampleY, normalizationMinHeight, normalizationMaxHeight) +
+                       verticalOffset;
+        return new Vector3(localX, localY, localZ);
+    }
+
+    private void PlaceGrassClusterInstance(
+        Transform grassClusterTransform,
         double[,] heightmap,
         TileObjectPlacement placement,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
+        if (grassClusterTransform == null)
+        {
+            return;
+        }
+
+        Vector3 localSurfacePoint = GetPlacementLocalPosition(
+            heightmap,
+            placement,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            grassClusterVerticalOffset);
+        Vector3 localSurfaceNormal = GetTerrainLocalNormal(
+            heightmap,
+            placement.X,
+            placement.Y,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        Quaternion localRotation = Quaternion.FromToRotation(Vector3.up, localSurfaceNormal);
+        grassClusterTransform.localRotation = localRotation;
+        grassClusterTransform.localPosition =
+            localSurfacePoint +
+            localSurfaceNormal * GetGrassClusterSurfaceOffset();
+    }
+
+    private Vector3 GetTerrainLocalNormal(
+        double[,] heightmap,
+        double sampleX,
+        double sampleY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
         int heightResolution = heightmap.GetLength(0);
         int widthResolution = heightmap.GetLength(1);
-        float normalizedX = widthResolution > 1
-            ? Mathf.Clamp01((float)(placement.X / (widthResolution - 1)))
-            : 0f;
-        float normalizedY = heightResolution > 1
-            ? Mathf.Clamp01((float)(placement.Y / (heightResolution - 1)))
-            : 0f;
+        if (heightResolution <= 1 || widthResolution <= 1)
+        {
+            return Vector3.up;
+        }
 
-        float localX = normalizedX * terrainWidth;
-        float localZ = (1f - normalizedY) * terrainLength;
-        float localY = SampleTerrainHeight(heightmap, placement.X, placement.Y, normalizationMinHeight, normalizationMaxHeight) +
-                       coniferVerticalOffset;
-        return new Vector3(localX, localY, localZ);
+        Vector3 pointLeft = GetTerrainLocalPoint(
+            heightmap,
+            sampleX - 1d,
+            sampleY,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            0f);
+        Vector3 pointRight = GetTerrainLocalPoint(
+            heightmap,
+            sampleX + 1d,
+            sampleY,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            0f);
+        Vector3 pointBack = GetTerrainLocalPoint(
+            heightmap,
+            sampleX,
+            sampleY - 1d,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            0f);
+        Vector3 pointForward = GetTerrainLocalPoint(
+            heightmap,
+            sampleX,
+            sampleY + 1d,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            0f);
+
+        Vector3 tangentX = pointRight - pointLeft;
+        Vector3 tangentY = pointForward - pointBack;
+        Vector3 normal = Vector3.Cross(tangentX, tangentY);
+        if (normal.sqrMagnitude <= 0.0001f)
+        {
+            return Vector3.up;
+        }
+
+        return normal.normalized;
     }
 
     private float SampleTerrainHeight(
@@ -1480,6 +1649,138 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         generatedConiferInstances.Add(new GeneratedConiferInstance(instance));
+    }
+
+    private void RegisterGeneratedGrassCluster(GameObject instance)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        TerrainConformBlanket blanket = instance.GetComponent<TerrainConformBlanket>();
+        if (blanket != null)
+        {
+            if (Application.isPlaying)
+            {
+                Destroy(blanket);
+            }
+            else
+            {
+                DestroyImmediate(blanket);
+            }
+        }
+    }
+
+    private void AlignExistingGeneratedGrassClusters()
+    {
+        foreach (Transform child in transform)
+        {
+            if (!IsGeneratedTerrainTransform(child))
+            {
+                continue;
+            }
+
+            Transform vegetationContainer = child.Find(generatedVegetationContainerName);
+            if (vegetationContainer == null)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < vegetationContainer.childCount; i++)
+            {
+                Transform vegetationChild = vegetationContainer.GetChild(i);
+                if (vegetationChild == null || !IsGrassClusterRoot(vegetationChild.gameObject))
+                {
+                    continue;
+                }
+
+                RegisterGeneratedGrassCluster(vegetationChild.gameObject);
+                AlignExistingGrassClusterToTerrainSurface(vegetationChild);
+            }
+        }
+    }
+
+    private void AlignExistingGrassClusterToTerrainSurface(Transform grassClusterTransform)
+    {
+        if (grassClusterTransform == null || !TrySampleGrassClusterSurface(grassClusterTransform, out RaycastHit surfaceHit))
+        {
+            return;
+        }
+
+        Quaternion worldRotation = Quaternion.FromToRotation(Vector3.up, surfaceHit.normal);
+        grassClusterTransform.rotation = worldRotation;
+        grassClusterTransform.position =
+            surfaceHit.point +
+            Vector3.up * grassClusterVerticalOffset +
+            surfaceHit.normal * GetGrassClusterSurfaceOffset();
+    }
+
+    private float GetGrassClusterSurfaceOffset()
+    {
+        return grassClusterConformSurfaceOffset;
+    }
+
+    private static bool TrySampleGrassClusterSurface(Transform grassClusterTransform, out RaycastHit surfaceHit)
+    {
+        surfaceHit = default;
+        if (grassClusterTransform == null)
+        {
+            return false;
+        }
+
+#if GRIFFIN
+        GStylizedTerrain terrain = grassClusterTransform.GetComponentInParent<GStylizedTerrain>();
+        if (terrain != null && terrain.isActiveAndEnabled && terrain.TerrainData != null)
+        {
+            Vector3 rayOrigin = grassClusterTransform.position + Vector3.up * 32f;
+            if (terrain.Raycast(new Ray(rayOrigin, Vector3.down), out surfaceHit, 96f))
+            {
+                return true;
+            }
+        }
+#endif
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            grassClusterTransform.position + Vector3.up * 32f,
+            Vector3.down,
+            96f,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+        float closestDistance = float.PositiveInfinity;
+        bool foundHit = false;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            RaycastHit hit = hits[i];
+            if (hit.collider == null || hit.collider.transform.IsChildOf(grassClusterTransform))
+            {
+                continue;
+            }
+
+            if (hit.distance >= closestDistance)
+            {
+                continue;
+            }
+
+            closestDistance = hit.distance;
+            surfaceHit = hit;
+            foundHit = true;
+        }
+
+        return foundHit;
+    }
+
+    private bool IsGeneratedTerrainTransform(Transform candidate)
+    {
+        return candidate != null &&
+               (candidate.name == generatedTerrainName ||
+                candidate.name.StartsWith(generatedTerrainName + "_", StringComparison.Ordinal));
+    }
+
+    private static bool IsGrassClusterRoot(GameObject candidate)
+    {
+        return candidate != null &&
+               candidate.name.Equals(DefaultGrassClusterPrefabName, StringComparison.OrdinalIgnoreCase);
     }
 
     private void UpdateConiferOptimization(bool forceFullIfNoTarget = false)
@@ -1703,6 +2004,12 @@ public sealed class TileLoader : MonoBehaviour
             return coniferOptimizationTarget;
         }
 
+        if (TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
+        {
+            coniferOptimizationTarget = taggedPlayerTransform;
+            return coniferOptimizationTarget;
+        }
+
         if (Camera.main != null)
         {
             return Camera.main.transform;
@@ -1733,10 +2040,45 @@ public sealed class TileLoader : MonoBehaviour
         return false;
     }
 
+    private static bool TryFindSceneTransformWithTag(string tagName, out Transform? result)
+    {
+        GameObject[] taggedObjects;
+        try
+        {
+            taggedObjects = GameObject.FindGameObjectsWithTag(tagName);
+        }
+        catch (UnityException)
+        {
+            result = null;
+            return false;
+        }
+
+        for (int i = 0; i < taggedObjects.Length; i++)
+        {
+            GameObject taggedObject = taggedObjects[i];
+            if (taggedObject == null || !taggedObject.scene.IsValid())
+            {
+                continue;
+            }
+
+            result = taggedObject.transform;
+            return true;
+        }
+
+        result = null;
+        return false;
+    }
+
     private static bool IsConiferPlacement(TileObjectPlacement placement)
     {
         return placement.Definition.NumericId == ConiferObjectNumericId ||
                placement.Definition.Id.Equals(ConiferObjectId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsGrassClusterPlacement(TileObjectPlacement placement)
+    {
+        return placement.Definition.NumericId == GrassClusterObjectNumericId ||
+               placement.Definition.Id.Equals(GrassClusterObjectId, StringComparison.OrdinalIgnoreCase);
     }
 
     private void EnsureConiferDefinitionRegistered()
@@ -1759,6 +2101,33 @@ public sealed class TileLoader : MonoBehaviour
                     prefabPath: DefaultConiferPrefabAssetPath,
                     densityMultiplier: 1.0,
                     vegetationCategory: "tree"));
+        }
+        catch (InvalidOperationException)
+        {
+            // Another loader may have registered the definition between the guard and the register call.
+        }
+    }
+
+    private void EnsureGrassClusterDefinitionRegistered()
+    {
+        if (TileObjectRegistry.TryGet(GrassClusterObjectNumericId, out _) ||
+            TileObjectRegistry.TryGet(GrassClusterObjectId, out _))
+        {
+            return;
+        }
+
+        try
+        {
+            TileObjectRegistry.Register(
+                new TileObjectDefinition(
+                    GrassClusterObjectNumericId,
+                    GrassClusterObjectId,
+                    "Grass Cluster",
+                    TileObjectCategory.Vegetation,
+                    new Rgba32(109, 170, 44, 255),
+                    prefabPath: DefaultGrassClusterPrefabAssetPath,
+                    densityMultiplier: 1.0,
+                    vegetationCategory: "understory"));
         }
         catch (InvalidOperationException)
         {
