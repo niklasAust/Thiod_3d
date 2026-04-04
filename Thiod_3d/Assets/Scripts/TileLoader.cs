@@ -88,10 +88,15 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float midHeightBlendMeters = 360f;
     [SerializeField] [Range(0f, 90f)] private float steepSlopeStartDegrees = 24f;
     [SerializeField] [Range(0.1f, 90f)] private float steepSlopeBlendDegrees = 12f;
-    [FormerlySerializedAs("peakHeightStart")]
-    [SerializeField] private float peakHeightStartMeters = 1480f;
-    [FormerlySerializedAs("peakHeightBlend")]
-    [SerializeField] private float peakHeightBlendMeters = 320f;
+    [SerializeField] private float ruggedSnowCapHillinessThreshold = 1.2f;
+    [SerializeField] private float ruggedSnowCapHillinessBlend = 0.2f;
+    [SerializeField] private float ruggedSnowCapBelowPeakMeters = 150f;
+    [SerializeField] private float ruggedSnowCapMinStartMeters = 1200f;
+    [SerializeField] private float ruggedSnowCapBlendMeters = 140f;
+    [SerializeField] private float fullSnowStartMeters = 2500f;
+    [SerializeField] private float fullSnowBlendMeters = 260f;
+    [SerializeField] [Range(0f, 90f)] private float fullSnowRockSlopeStartDegrees = 48f;
+    [SerializeField] [Range(0.1f, 90f)] private float fullSnowRockSlopeBlendDegrees = 12f;
 
     [Header("Vegetation Output")]
     [SerializeField] private bool placeConiferTrees = true;
@@ -111,10 +116,16 @@ public sealed class TileLoader : MonoBehaviour
 
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
+    [SerializeField, HideInInspector] private List<GeneratedTerrainShadingMetadata> generatedTerrainShadingMetadata = new();
 
     private bool hasLoadedInCurrentEnableCycle;
     private bool coniferOptimizationWasActive;
     private float nextConiferOptimizationTime;
+    private bool pendingRuntimeSeamRebuild;
+    private int runtimeSeamRebuildFrame;
+#if UNITY_EDITOR
+    private bool pendingEditorSeamRebuild;
+#endif
     private readonly List<GeneratedConiferInstance> generatedConiferInstances = new();
 
     private void OnEnable()
@@ -125,6 +136,12 @@ public sealed class TileLoader : MonoBehaviour
         {
             LoadTileIntoScene();
         }
+#if UNITY_EDITOR
+        else if (!Application.isPlaying && loadOnEnableInEditMode && HasGeneratedTerrains())
+        {
+            ScheduleEditorTerrainSeamRebuild();
+        }
+#endif
     }
 
     private void Start()
@@ -132,6 +149,12 @@ public sealed class TileLoader : MonoBehaviour
         if (Application.isPlaying && loadOnStartInPlayMode)
         {
             LoadTileIntoScene();
+            return;
+        }
+
+        if (Application.isPlaying && HasGeneratedTerrains())
+        {
+            ScheduleRuntimeTerrainSeamRebuild();
         }
     }
 
@@ -140,6 +163,12 @@ public sealed class TileLoader : MonoBehaviour
         if (!Application.isPlaying)
         {
             return;
+        }
+
+        if (pendingRuntimeSeamRebuild && Time.frameCount >= runtimeSeamRebuildFrame)
+        {
+            pendingRuntimeSeamRebuild = false;
+            RebuildExistingGeneratedTerrainSeams();
         }
 
         if (!optimizeConifersByDistance)
@@ -275,6 +304,43 @@ public sealed class TileLoader : MonoBehaviour
         return false;
     }
 
+    private void ScheduleRuntimeTerrainSeamRebuild()
+    {
+        pendingRuntimeSeamRebuild = true;
+        runtimeSeamRebuildFrame = Time.frameCount + 1;
+    }
+
+#if UNITY_EDITOR
+    private void ScheduleEditorTerrainSeamRebuild()
+    {
+        if (pendingEditorSeamRebuild)
+        {
+            return;
+        }
+
+        pendingEditorSeamRebuild = true;
+        EditorApplication.delayCall += RunDeferredEditorSeamRebuild;
+    }
+
+    private void RunDeferredEditorSeamRebuild()
+    {
+        EditorApplication.delayCall -= RunDeferredEditorSeamRebuild;
+        pendingEditorSeamRebuild = false;
+
+        if (this == null ||
+            gameObject == null ||
+            !gameObject.activeInHierarchy ||
+            Application.isPlaying ||
+            EditorApplication.isPlayingOrWillChangePlaymode ||
+            !HasGeneratedTerrains())
+        {
+            return;
+        }
+
+        RebuildExistingGeneratedTerrainSeams();
+    }
+#endif
+
 #if GRIFFIN
     private void CreateOrUpdateTerrains(TileGenerator tileGenerator, LoadedWorldData loadedWorldData, GenerationSettings settings)
     {
@@ -315,7 +381,8 @@ public sealed class TileLoader : MonoBehaviour
                     unityTileX,
                     unityTileY,
                     tileMinHeight,
-                    tileMaxHeight));
+                    tileMaxHeight,
+                    GetCenterTileHilliness(layers)));
             }
         }
 
@@ -335,6 +402,7 @@ public sealed class TileLoader : MonoBehaviour
                 normalizationMaxHeight,
                 request.LocalMinHeight,
                 request.LocalMaxHeight,
+                request.TileHilliness,
                 terrainGroupId);
             createdTerrains.Add(terrain);
         }
@@ -354,6 +422,7 @@ public sealed class TileLoader : MonoBehaviour
     private void ClearGeneratedTerrains()
     {
         generatedConiferInstances.Clear();
+        generatedTerrainShadingMetadata.Clear();
         nextConiferOptimizationTime = 0f;
         var toRemove = new List<Transform>();
         foreach (Transform child in transform)
@@ -402,6 +471,7 @@ public sealed class TileLoader : MonoBehaviour
         double normalizationMaxHeight,
         double localMinHeight,
         double localMaxHeight,
+        double tileHilliness,
         int terrainGroupId)
     {
         GTexturingModel texturingModel = GetTexturingModel();
@@ -414,7 +484,14 @@ public sealed class TileLoader : MonoBehaviour
         terrainData.Geometry.MeshBaseResolution = 0;
         terrainData.Geometry.MeshResolution = 3;
         terrainData.Geometry.ChunkGridSize = Mathf.Max(1, terrainGridSize);
-        ConfigureShading(terrainData, texturingModel, layers.Heightmap, normalizationMinHeight, normalizationMaxHeight);
+        ConfigureShading(
+            terrainData,
+            texturingModel,
+            layers.Heightmap,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            localMaxHeight,
+            tileHilliness);
 
         Texture2D heightMap = Polaris.GetHeightMap(terrainData);
         Color[] pixels = BuildHeightPixels(layers.Heightmap, normalizationMinHeight, normalizationMaxHeight);
@@ -429,10 +506,12 @@ public sealed class TileLoader : MonoBehaviour
         terrain.transform.localPosition = localPosition;
         terrain.transform.localRotation = Quaternion.identity;
         terrain.transform.localScale = Vector3.one;
-        TileLoaderTerrainMetadata metadata = terrain.GetComponent<TileLoaderTerrainMetadata>() ??
-                                            terrain.gameObject.AddComponent<TileLoaderTerrainMetadata>();
-        metadata.NormalizationMinHeight = normalizationMinHeight;
-        metadata.NormalizationMaxHeight = normalizationMaxHeight;
+        SetTerrainShadingMetadata(
+            terrainObjectName,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            TileHeightUnitsToMeters(localMaxHeight),
+            tileHilliness);
         terrain.TerrainData.Shading.UpdateMaterials();
         ApplyWorldAlignedSplatMaterialOffsets(terrain);
 
@@ -453,11 +532,19 @@ public sealed class TileLoader : MonoBehaviour
         GTexturingModel texturingModel,
         double[,] sourceHeightmap,
         double normalizationMinHeight,
-        double normalizationMaxHeight)
+        double normalizationMaxHeight,
+        double localMaxHeight,
+        double tileHilliness)
     {
         Material material = CreateTerrainMaterial(texturingModel);
         Polaris.SetTerrainMaterial(terrainData, material);
-        ApplyTerrainShading(terrainData, sourceHeightmap, normalizationMinHeight, normalizationMaxHeight);
+        ApplyTerrainShading(
+            terrainData,
+            sourceHeightmap,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            localMaxHeight,
+            tileHilliness);
     }
 
     private Material CreateTerrainMaterial(GTexturingModel texturingModel)
@@ -513,7 +600,9 @@ public sealed class TileLoader : MonoBehaviour
         GTerrainData terrainData,
         double[,] sourceHeightmap,
         double normalizationMinHeight,
-        double normalizationMaxHeight)
+        double normalizationMaxHeight,
+        double localMaxHeight,
+        double tileHilliness)
     {
         if (terrainData == null || terrainData.Shading == null)
         {
@@ -528,7 +617,14 @@ public sealed class TileLoader : MonoBehaviour
 
         float[,] normalizedHeights = BuildNormalizedHeights(sourceHeightmap, normalizationMinHeight, normalizationMaxHeight);
         float[,] heightMeters = BuildHeightMeters(sourceHeightmap);
-        ApplyTextureBlendSettings(terrainData.Shading, terrainData, normalizedHeights, heightMeters, null);
+        ApplyTextureBlendSettings(
+            terrainData.Shading,
+            terrainData,
+            normalizedHeights,
+            heightMeters,
+            TileHeightUnitsToMeters(localMaxHeight),
+            (float)tileHilliness,
+            null);
     }
 
     private void ApplyTerrainShading(IReadOnlyList<GStylizedTerrain> terrains)
@@ -562,8 +658,46 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         float[,] normalizedHeights = DecodeNormalizedHeights(heightTexture);
-        float[,] heightMeters = TryBuildHeightMetersForTerrain(terrain, normalizedHeights);
-        ApplyTextureBlendSettings(terrain.TerrainData.Shading, terrain.TerrainData, normalizedHeights, heightMeters, terrain);
+        GeneratedTerrainShadingMetadata? shadingMetadata = GetTerrainShadingMetadata(terrain.name);
+        float[,] heightMeters = shadingMetadata.HasValue
+            ? BuildHeightMetersFromNormalizedHeights(
+                normalizedHeights,
+                shadingMetadata.Value.NormalizationMinHeight,
+                shadingMetadata.Value.NormalizationMaxHeight)
+            : BuildHeightMetersFromNormalizedHeights(normalizedHeights, 0.0, MaxTileHeightUnits);
+        float localMaxHeightMeters = shadingMetadata.HasValue && shadingMetadata.Value.LocalMaxHeightMeters > 0f
+            ? shadingMetadata.Value.LocalMaxHeightMeters
+            : EstimateMaxHeightMeters(heightMeters);
+        float tileHilliness = shadingMetadata.HasValue && shadingMetadata.Value.TileHilliness > 0.0
+            ? (float)shadingMetadata.Value.TileHilliness
+            : EstimateTileHilliness(heightMeters);
+        if (!shadingMetadata.HasValue)
+        {
+            SetTerrainShadingMetadata(
+                terrain.name,
+                0.0,
+                MaxTileHeightUnits,
+                localMaxHeightMeters,
+                tileHilliness);
+        }
+        else if (shadingMetadata.Value.LocalMaxHeightMeters <= 0f || shadingMetadata.Value.TileHilliness <= 0.0)
+        {
+            SetTerrainShadingMetadata(
+                terrain.name,
+                shadingMetadata.Value.NormalizationMinHeight,
+                shadingMetadata.Value.NormalizationMaxHeight,
+                localMaxHeightMeters,
+                tileHilliness);
+        }
+
+        ApplyTextureBlendSettings(
+            terrain.TerrainData.Shading,
+            terrain.TerrainData,
+            normalizedHeights,
+            heightMeters,
+            localMaxHeightMeters,
+            tileHilliness,
+            terrain);
     }
 
     private void ApplyTextureBlendSettings(
@@ -571,6 +705,8 @@ public sealed class TileLoader : MonoBehaviour
         GTerrainData terrainData,
         float[,] normalizedHeights,
         float[,] heightMeters,
+        float localMaxHeightMeters,
+        float tileHilliness,
         GStylizedTerrain? terrain)
     {
         GSplatPrototypeGroup splatGroup = shading.Splats;
@@ -593,10 +729,15 @@ public sealed class TileLoader : MonoBehaviour
         };
 
         shading.SplatControlResolution = Mathf.Max(32, Mathf.Max(normalizedHeights.GetLength(0), normalizedHeights.GetLength(1)));
-        shading.SetAlphamaps(BuildTextureBlendAlphamaps(normalizedHeights, heightMeters, terrain));
+        shading.SetAlphamaps(BuildTextureBlendAlphamaps(normalizedHeights, heightMeters, localMaxHeightMeters, tileHilliness, terrain));
     }
 
-    private float[,,] BuildTextureBlendAlphamaps(float[,] normalizedHeights, float[,] heightMeters, GStylizedTerrain? terrain)
+    private float[,,] BuildTextureBlendAlphamaps(
+        float[,] normalizedHeights,
+        float[,] heightMeters,
+        float localMaxHeightMeters,
+        float tileHilliness,
+        GStylizedTerrain? terrain)
     {
         int resolutionY = normalizedHeights.GetLength(0);
         int resolutionX = normalizedHeights.GetLength(1);
@@ -607,6 +748,11 @@ public sealed class TileLoader : MonoBehaviour
         Vector2 terrainOrigin = terrain != null
             ? new Vector2(terrain.transform.localPosition.x, terrain.transform.localPosition.z)
             : Vector2.zero;
+        float ruggedSnowCapWeight = SmoothRange(tileHilliness, ruggedSnowCapHillinessThreshold, ruggedSnowCapHillinessBlend);
+        float ruggedSnowCapStart = Mathf.Max(
+            ruggedSnowCapMinStartMeters,
+            localMaxHeightMeters - ruggedSnowCapBelowPeakMeters);
+        float effectiveCapSnowBlend = Mathf.Lerp(fullSnowBlendMeters, ruggedSnowCapBlendMeters, ruggedSnowCapWeight);
 
         for (int y = 0; y < resolutionY; y++)
         {
@@ -617,13 +763,20 @@ public sealed class TileLoader : MonoBehaviour
                 float absoluteHeightMeters = heightMeters[y, x];
                 float macroBias = SampleSignedNoise(worldX, worldZ, macroVariationScale) * macroVariationStrength;
                 float adjustedMidStart = Mathf.Max(0f, midHeightStartMeters + macroBias * 180f);
-                float adjustedPeakStart = Mathf.Max(0f, peakHeightStartMeters + macroBias * 220f);
+                float adjustedFullSnowStart = Mathf.Max(0f, fullSnowStartMeters + macroBias * 220f);
                 float adjustedSlopeStart = Mathf.Clamp(steepSlopeStartDegrees + macroBias * 18f, 0f, 90f);
+                float adjustedFullSnowRockSlope = Mathf.Clamp(fullSnowRockSlopeStartDegrees + macroBias * 6f, 0f, 90f);
                 float slopeDegrees = terrain != null
                     ? SampleSlopeDegrees(terrain, normalizedHeights, x, y, sampleSpacingX, sampleSpacingZ)
                     : SampleSlopeDegrees(normalizedHeights, x, y, sampleSpacingX, sampleSpacingZ);
-                float peakWeight = SmoothRange(absoluteHeightMeters, adjustedPeakStart, peakHeightBlendMeters);
-                float cliffWeight = SmoothRange(slopeDegrees, adjustedSlopeStart, steepSlopeBlendDegrees) * (1f - peakWeight * 0.4f);
+                float effectiveCapSnowStart = Mathf.Lerp(adjustedFullSnowStart, ruggedSnowCapStart, ruggedSnowCapWeight);
+                float capSnowWeight = ruggedSnowCapWeight * SmoothRange(absoluteHeightMeters, effectiveCapSnowStart, effectiveCapSnowBlend);
+                float highAltitudeSnowWeight = SmoothRange(absoluteHeightMeters, adjustedFullSnowStart, fullSnowBlendMeters);
+                float steepRockInSnowWeight = SmoothRange(slopeDegrees, adjustedFullSnowRockSlope, fullSnowRockSlopeBlendDegrees);
+                float snowWeight = Mathf.Max(capSnowWeight, highAltitudeSnowWeight);
+                float peakWeight = snowWeight * (1f - steepRockInSnowWeight);
+                float baseCliffWeight = SmoothRange(slopeDegrees, adjustedSlopeStart, steepSlopeBlendDegrees);
+                float cliffWeight = Mathf.Max(baseCliffWeight * (1f - peakWeight * 0.25f), snowWeight * steepRockInSnowWeight);
                 float midWeight = SmoothRange(absoluteHeightMeters, adjustedMidStart, midHeightBlendMeters) * (1f - peakWeight);
                 float lowWeight = 1f - Mathf.Clamp01(midWeight + peakWeight);
 
@@ -769,23 +922,72 @@ public sealed class TileLoader : MonoBehaviour
         return heightMeters;
     }
 
-    private static float[,] TryBuildHeightMetersForTerrain(GStylizedTerrain terrain, float[,] normalizedHeights)
-    {
-        TileLoaderTerrainMetadata? metadata = terrain != null ? terrain.GetComponent<TileLoaderTerrainMetadata>() : null;
-        if (metadata != null)
-        {
-            return BuildHeightMetersFromNormalizedHeights(
-                normalizedHeights,
-                metadata.NormalizationMinHeight,
-                metadata.NormalizationMaxHeight);
-        }
-
-        return BuildHeightMetersFromNormalizedHeights(normalizedHeights, 0.0, MaxTileHeightUnits);
-    }
-
     private static float TileHeightUnitsToMeters(double heightUnits)
     {
         return (float)Math.Max(0.0, heightUnits * MetersPerTileHeightUnit);
+    }
+
+    private static float EstimateMaxHeightMeters(float[,] heightMeters)
+    {
+        float maxHeightMeters = 0f;
+        int resolutionY = heightMeters.GetLength(0);
+        int resolutionX = heightMeters.GetLength(1);
+        for (int y = 0; y < resolutionY; y++)
+        {
+            for (int x = 0; x < resolutionX; x++)
+            {
+                maxHeightMeters = Mathf.Max(maxHeightMeters, heightMeters[y, x]);
+            }
+        }
+
+        return maxHeightMeters;
+    }
+
+    private static float EstimateTileHilliness(float[,] heightMeters)
+    {
+        return (float)TerrainUtils.ElevationToHilliness(EstimateMaxHeightMeters(heightMeters));
+    }
+
+    private GeneratedTerrainShadingMetadata? GetTerrainShadingMetadata(string terrainName)
+    {
+        for (int i = 0; i < generatedTerrainShadingMetadata.Count; i++)
+        {
+            if (string.Equals(generatedTerrainShadingMetadata[i].TerrainName, terrainName, StringComparison.Ordinal))
+            {
+                return generatedTerrainShadingMetadata[i];
+            }
+        }
+
+        return null;
+    }
+
+    private void SetTerrainShadingMetadata(
+        string terrainName,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        float localMaxHeightMeters,
+        double tileHilliness)
+    {
+        for (int i = 0; i < generatedTerrainShadingMetadata.Count; i++)
+        {
+            if (string.Equals(generatedTerrainShadingMetadata[i].TerrainName, terrainName, StringComparison.Ordinal))
+            {
+                generatedTerrainShadingMetadata[i] = new GeneratedTerrainShadingMetadata(
+                    terrainName,
+                    normalizationMinHeight,
+                    normalizationMaxHeight,
+                    localMaxHeightMeters,
+                    tileHilliness);
+                return;
+            }
+        }
+
+        generatedTerrainShadingMetadata.Add(new GeneratedTerrainShadingMetadata(
+            terrainName,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            localMaxHeightMeters,
+            tileHilliness));
     }
 
     private float SampleSlopeDegrees(GStylizedTerrain terrain, float[,] normalizedHeights, int x, int y, float sampleSpacingX, float sampleSpacingZ)
@@ -1008,6 +1210,26 @@ public sealed class TileLoader : MonoBehaviour
             Polaris.UpdateTerrainMesh(terrain, new[] { fullRegion });
             terrain.TerrainData.Shading.UpdateMaterials();
         }
+    }
+
+    private void RebuildExistingGeneratedTerrainSeams()
+    {
+        var terrains = new List<GStylizedTerrain>();
+        foreach (GStylizedTerrain terrain in GetGeneratedTerrains())
+        {
+            if (terrain != null && terrain.TerrainData != null)
+            {
+                terrains.Add(terrain);
+            }
+        }
+
+        if (terrains.Count == 0)
+        {
+            return;
+        }
+
+        RebuildTerrainSeams(terrains);
+        ApplyTerrainShading(terrains);
     }
 
     private void PopulateVegetation(
@@ -1592,8 +1814,14 @@ public sealed class TileLoader : MonoBehaviour
         midHeightStartMeters = Mathf.Max(0f, midHeightStartMeters);
         midHeightBlendMeters = Mathf.Max(1f, midHeightBlendMeters);
         steepSlopeBlendDegrees = Mathf.Max(0.1f, steepSlopeBlendDegrees);
-        peakHeightStartMeters = Mathf.Max(0f, peakHeightStartMeters);
-        peakHeightBlendMeters = Mathf.Max(1f, peakHeightBlendMeters);
+        ruggedSnowCapHillinessThreshold = Mathf.Max(0f, ruggedSnowCapHillinessThreshold);
+        ruggedSnowCapHillinessBlend = Mathf.Max(0.01f, ruggedSnowCapHillinessBlend);
+        ruggedSnowCapBelowPeakMeters = Mathf.Max(0f, ruggedSnowCapBelowPeakMeters);
+        ruggedSnowCapMinStartMeters = Mathf.Max(0f, ruggedSnowCapMinStartMeters);
+        ruggedSnowCapBlendMeters = Mathf.Max(1f, ruggedSnowCapBlendMeters);
+        fullSnowStartMeters = Mathf.Max(0f, fullSnowStartMeters);
+        fullSnowBlendMeters = Mathf.Max(1f, fullSnowBlendMeters);
+        fullSnowRockSlopeBlendDegrees = Mathf.Max(0.1f, fullSnowRockSlopeBlendDegrees);
     }
 
     private void EnsureVegetationDefaults()
@@ -1697,6 +1925,18 @@ public sealed class TileLoader : MonoBehaviour
             minHeight = 0;
             maxHeight = 0;
         }
+    }
+
+    private static double GetCenterTileHilliness(TileLayers layers)
+    {
+        if (layers.SurroundingHilliness.GetLength(0) > 1 && layers.SurroundingHilliness.GetLength(1) > 1)
+        {
+            return layers.SurroundingHilliness[1, 1];
+        }
+
+        int centerY = layers.Heightmap.GetLength(0) / 2;
+        int centerX = layers.Heightmap.GetLength(1) / 2;
+        return TerrainUtils.ElevationToHilliness(TileHeightUnitsToMeters(layers.Heightmap[centerY, centerX]));
     }
 #endif
 
@@ -2232,7 +2472,8 @@ public sealed class TileLoader : MonoBehaviour
             int unityTileX,
             int unityTileY,
             double localMinHeight,
-            double localMaxHeight)
+            double localMaxHeight,
+            double tileHilliness)
         {
             Layers = layers;
             TerrainObjectName = terrainObjectName;
@@ -2241,6 +2482,7 @@ public sealed class TileLoader : MonoBehaviour
             UnityTileY = unityTileY;
             LocalMinHeight = localMinHeight;
             LocalMaxHeight = localMaxHeight;
+            TileHilliness = tileHilliness;
         }
 
         public TileLayers Layers { get; }
@@ -2250,6 +2492,31 @@ public sealed class TileLoader : MonoBehaviour
         public int UnityTileY { get; }
         public double LocalMinHeight { get; }
         public double LocalMaxHeight { get; }
+        public double TileHilliness { get; }
+    }
+
+    [Serializable]
+    private struct GeneratedTerrainShadingMetadata
+    {
+        public GeneratedTerrainShadingMetadata(
+            string terrainName,
+            double normalizationMinHeight,
+            double normalizationMaxHeight,
+            float localMaxHeightMeters,
+            double tileHilliness)
+        {
+            TerrainName = terrainName;
+            NormalizationMinHeight = normalizationMinHeight;
+            NormalizationMaxHeight = normalizationMaxHeight;
+            LocalMaxHeightMeters = localMaxHeightMeters;
+            TileHilliness = tileHilliness;
+        }
+
+        public string TerrainName;
+        public double NormalizationMinHeight;
+        public double NormalizationMaxHeight;
+        public float LocalMaxHeightMeters;
+        public double TileHilliness;
     }
 
     private enum TerrainShadingMode
@@ -2257,11 +2524,4 @@ public sealed class TileLoader : MonoBehaviour
         PolarisTextureBlend,
         FallbackLit,
     }
-}
-
-[DisallowMultipleComponent]
-public sealed class TileLoaderTerrainMetadata : MonoBehaviour
-{
-    [HideInInspector] public double NormalizationMinHeight;
-    [HideInInspector] public double NormalizationMaxHeight;
 }
