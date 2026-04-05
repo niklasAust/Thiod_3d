@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: 39c9bf9db0347674bb1c4ef05b458a13
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 196511
+  packageName: Lowpoly Style Mesh Generator
+  packageVersion: 2025.6
+  assetPath: Assets/Amazing Assets/Lowpoly Style Mesh Generator/Scripts/LowpolyStyleMeshGenerator.cs
+  uploadId: 835440

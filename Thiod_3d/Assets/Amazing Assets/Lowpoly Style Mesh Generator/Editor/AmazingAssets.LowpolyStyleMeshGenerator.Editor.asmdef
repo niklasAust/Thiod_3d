@@ -1,0 +1,18 @@
+{
+    "name": "AmazingAssets.LowpolyStyleMeshGenerator.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:4d9cfef81b4f1f04385f6b9f74f3ab78"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

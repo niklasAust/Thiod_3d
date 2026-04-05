@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: 10ffbe05775a177438d9d3ab9531e707
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {fileID: 2800000, guid: 8e2142ece529651488e3a2164a391706, type: 3}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 196511
+  packageName: Lowpoly Style Mesh Generator
+  packageVersion: 2025.6
+  assetPath: Assets/Amazing Assets/Lowpoly Style Mesh Generator/Editor/ReadMe/ReadMe.cs
+  uploadId: 835440

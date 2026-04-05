@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: fe8235476fe3440408e9e56f576c0e18
+TextScriptImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 196511
+  packageName: Lowpoly Style Mesh Generator
+  packageVersion: 2025.6
+  assetPath: Assets/Amazing Assets/Lowpoly Style Mesh Generator/Shaders/Templates/Preview
+    (HDRP).txt
+  uploadId: 835440

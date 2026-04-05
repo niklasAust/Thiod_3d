@@ -59,6 +59,7 @@
         "category": "Decoration",
         "vegetationCategory": "debris",
         "itemId": "stone",
+        "prefab": "Assets/CustomAssets/stone.prefab",
         "previewColour": "#808080"
     },
     "vegetation.branch": {
@@ -87,6 +88,7 @@
         "category": "Decoration",
         "vegetationCategory": "debris",
         "itemId": "flint",
+        "prefab": "Assets/CustomAssets/flint_stone.prefab",
         "previewColour": "#6E7480"
     },
     "vegetation.herb": {
@@ -252,7 +254,7 @@
         "name": "Nettle Patch",
         "category": "Vegetation",
         "vegetationCategory": "nettle",
-        "prefab": "Prefabs/Vegetation/Nettle.prefab",
+        "prefab": "Assets/CustomAssets/nettle.prefab",
         "previewColour": "#79B24A"
     }
 }

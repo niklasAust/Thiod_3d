@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 874f8a00fa665624f8f5b9b1252d4070
+TextScriptImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 196511
+  packageName: Lowpoly Style Mesh Generator
+  packageVersion: 2025.6
+  assetPath: Assets/Amazing Assets/Lowpoly Style Mesh Generator/Shaders/Templates/Preview
+    (URP).txt
+  uploadId: 835440
