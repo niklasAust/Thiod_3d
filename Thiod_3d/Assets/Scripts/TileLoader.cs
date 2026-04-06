@@ -137,6 +137,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.05f;
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
+    [SerializeField, Min(0.1f)] private float riverWaterUvWidthScale = 1f;
     [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.05f;
     [SerializeField, Min(1)] private int riverWaterTangentSmoothingRadius = 4;
 
@@ -1514,6 +1515,7 @@ public sealed class TileLoader : MonoBehaviour
             0.05f,
             (float)riverPath.HalfWidthPixels * metersPerSample * Mathf.Max(0.05f, riverWaterWidthMultiplier));
         float uvLengthScale = Mathf.Max(0.1f, riverWaterUvLengthScale);
+        float uvWidthScale = Mathf.Max(0.1f, riverWaterUvWidthScale);
         float fadeFraction = Mathf.Clamp01((float)riverPath.FadeFraction);
         int tangentSmoothingRadius = Math.Max(1, riverWaterTangentSmoothingRadius);
 
@@ -1558,7 +1560,7 @@ public sealed class TileLoader : MonoBehaviour
             vertices.Add(leftVertex);
             vertices.Add(rightVertex);
             uvs.Add(new Vector2(0f, uvY));
-            uvs.Add(new Vector2(1f, uvY));
+            uvs.Add(new Vector2(uvWidthScale, uvY));
             colors.Add(Color.white);
             colors.Add(Color.white);
 
