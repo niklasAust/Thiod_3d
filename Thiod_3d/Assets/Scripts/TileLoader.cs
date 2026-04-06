@@ -1349,35 +1349,90 @@ public sealed class TileLoader : MonoBehaviour
             }
 
             Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
-            for (int pathIndex = 0; pathIndex < riverPaths.Count; pathIndex++)
+            Mesh? riverMesh = BuildRiverWaterMesh(
+                terrain,
+                request.Layers.Heightmap,
+                riverPaths,
+                normalizationMinHeight,
+                normalizationMaxHeight);
+            if (riverMesh == null)
             {
-                Mesh? riverMesh = BuildRiverWaterMesh(
-                    terrain,
-                    request.Layers.Heightmap,
-                    riverPaths[pathIndex],
-                    normalizationMinHeight,
-                    normalizationMaxHeight);
-                if (riverMesh == null)
-                {
-                    continue;
-                }
-
-                var riverObject = new GameObject($"RiverWater_{pathIndex:00}");
-                riverObject.transform.SetParent(riverContainer, false);
-                riverObject.transform.localPosition = Vector3.zero;
-                riverObject.transform.localRotation = Quaternion.identity;
-                riverObject.transform.localScale = Vector3.one;
-                ApplyRiverWaterLayer(riverObject);
-
-                MeshFilter meshFilter = riverObject.AddComponent<MeshFilter>();
-                meshFilter.sharedMesh = riverMesh;
-
-                MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
-                meshRenderer.sharedMaterial = waterMaterial;
-                meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
-                meshRenderer.receiveShadows = false;
+                continue;
             }
+
+            var riverObject = new GameObject("RiverWater");
+            riverObject.transform.SetParent(riverContainer, false);
+            riverObject.transform.localPosition = Vector3.zero;
+            riverObject.transform.localRotation = Quaternion.identity;
+            riverObject.transform.localScale = Vector3.one;
+            ApplyRiverWaterLayer(riverObject);
+
+            MeshFilter meshFilter = riverObject.AddComponent<MeshFilter>();
+            meshFilter.sharedMesh = riverMesh;
+
+            MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
+            meshRenderer.sharedMaterial = waterMaterial;
+            meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+            meshRenderer.receiveShadows = false;
         }
+    }
+
+    private Mesh? BuildRiverWaterMesh(
+        GStylizedTerrain? terrain,
+        double[,] heightmap,
+        IReadOnlyList<RiverSurfacePath> riverPaths,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        var combineInstances = new List<CombineInstance>();
+        int vertexCount = 0;
+
+        for (int i = 0; i < riverPaths.Count; i++)
+        {
+            Mesh? pathMesh = BuildRiverWaterMesh(
+                terrain,
+                heightmap,
+                riverPaths[i],
+                normalizationMinHeight,
+                normalizationMaxHeight);
+            if (pathMesh == null)
+            {
+                continue;
+            }
+
+            vertexCount += pathMesh.vertexCount;
+            combineInstances.Add(new CombineInstance
+            {
+                mesh = pathMesh,
+                transform = Matrix4x4.identity,
+            });
+        }
+
+        if (combineInstances.Count == 0)
+        {
+            return null;
+        }
+
+        if (combineInstances.Count == 1)
+        {
+            combineInstances[0].mesh.name = "Generated River Water Mesh";
+            return combineInstances[0].mesh;
+        }
+
+        var combinedMesh = new Mesh
+        {
+            name = "Generated River Water Mesh"
+        };
+        if (vertexCount > ushort.MaxValue)
+        {
+            combinedMesh.indexFormat = IndexFormat.UInt32;
+        }
+
+        combinedMesh.CombineMeshes(combineInstances.ToArray(), true, false, false);
+        combinedMesh.RecalculateBounds();
+        combinedMesh.RecalculateNormals();
+        combinedMesh.RecalculateTangents();
+        return combinedMesh;
     }
 
     private Mesh? BuildRiverWaterMesh(
@@ -1455,12 +1510,13 @@ public sealed class TileLoader : MonoBehaviour
             float halfWidth = baseHalfWidth * Mathf.Clamp01(widthFactor);
             Vector3 leftVertex = centers[i] - right * halfWidth;
             Vector3 rightVertex = centers[i] + right * halfWidth;
-            float uvY = downstreamDistance / uvLengthScale;
+            float uvXHalfWidth = halfWidth / uvLengthScale;
+            float uvY = -downstreamDistance / uvLengthScale;
 
             vertices.Add(leftVertex);
             vertices.Add(rightVertex);
-            uvs.Add(new Vector2(0f, uvY));
-            uvs.Add(new Vector2(1f, uvY));
+            uvs.Add(new Vector2(-uvXHalfWidth, uvY));
+            uvs.Add(new Vector2(uvXHalfWidth, uvY));
             colors.Add(Color.white);
             colors.Add(Color.white);
 
