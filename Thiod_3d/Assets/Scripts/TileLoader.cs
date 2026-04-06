@@ -138,6 +138,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
     [SerializeField, Min(0.1f)] private float riverWaterUvWidthScale = 1f;
+    [SerializeField, Min(0f)] private float riverWaterSpeedMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.05f;
     [SerializeField, Min(1)] private int riverWaterTangentSmoothingRadius = 4;
 
@@ -1415,9 +1416,44 @@ public sealed class TileLoader : MonoBehaviour
 
             MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
             meshRenderer.sharedMaterial = waterMaterial;
+            ApplyRiverWaterMaterialOverrides(meshRenderer, waterMaterial);
             meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
             meshRenderer.receiveShadows = false;
         }
+    }
+
+    private void ApplyRiverWaterMaterialOverrides(MeshRenderer meshRenderer, Material waterMaterial)
+    {
+        float speedMultiplier = Mathf.Max(0f, riverWaterSpeedMultiplier);
+        if (Mathf.Approximately(speedMultiplier, 1f))
+        {
+            return;
+        }
+
+        var propertyBlock = new MaterialPropertyBlock();
+        meshRenderer.GetPropertyBlock(propertyBlock);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_Speed", speedMultiplier);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_NormalSpeed", speedMultiplier);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_FoamSpeed", speedMultiplier);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_FoamSubSpeed", speedMultiplier);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_IntersectionSpeed", speedMultiplier);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_WaveSpeed", speedMultiplier);
+        ApplyScaledMaterialFloat(propertyBlock, waterMaterial, "_SlopeSpeed", speedMultiplier);
+        meshRenderer.SetPropertyBlock(propertyBlock);
+    }
+
+    private static void ApplyScaledMaterialFloat(
+        MaterialPropertyBlock propertyBlock,
+        Material sourceMaterial,
+        string propertyName,
+        float multiplier)
+    {
+        if (!sourceMaterial.HasProperty(propertyName))
+        {
+            return;
+        }
+
+        propertyBlock.SetFloat(propertyName, sourceMaterial.GetFloat(propertyName) * multiplier);
     }
 
     private Mesh? BuildRiverWaterMesh(
