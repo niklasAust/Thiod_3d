@@ -55,6 +55,20 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private int fallbackHillSpacing = 64;
     [SerializeField] private float fallbackHillStrength = 1f;
 
+    [Header("River Terrain Carving")]
+    [SerializeField, Range(0f, 1f)] private float riverCorridorSmoothingStrength = 0.35f;
+    [SerializeField, Min(0)] private int riverCorridorSmoothingKernelRadius = 8;
+    [SerializeField, Min(1)] private int riverCorridorSmoothingPasses = 3;
+    [SerializeField, Min(0f)] private float riverCorridorDepressionMeters = 2f;
+    [SerializeField, Min(0.05f)] private float riverCorridorMaxSlopeMetersPerSample = 1.25f;
+    [SerializeField, Min(0.1f)] private float riverCorridorRadiusMultiplier = 1.25f;
+    [SerializeField, Min(0)] private int riverCorridorMinRadiusSamples = 16;
+    [SerializeField, Min(0f)] private float riverDepthMultiplier = 0.18f;
+    [SerializeField, Min(0f)] private float riverBankDepthMultiplier = 1f;
+    [SerializeField, Min(0f)] private float riverCenterDepthMultiplier = 0f;
+    [SerializeField, Min(0.1f)] private float riverCarveWidthMultiplier = 1.5f;
+    [SerializeField, Min(0f)] private float riverShoulderDepthMultiplier = 2f;
+
     [Header("Terrain Output")]
     [SerializeField] private string generatedTerrainName = "LoadedTileTerrain";
     [SerializeField] private float terrainWidth = 128f;
@@ -114,10 +128,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private string generatedRiverWaterContainerName = "Rivers";
     [SerializeField] private Material? riverWaterMaterial;
     [SerializeField] private string riverWaterMaterialAssetPath = DefaultRiverWaterMaterialAssetPath;
-    [SerializeField] private float riverWaterVerticalOffset = 0.18f;
     [SerializeField, Min(0.05f)] private float riverWaterWidthMultiplier = 1.45f;
-    [SerializeField, Min(0.1f)] private float riverWaterBankSampleMultiplier = 1.35f;
-    [SerializeField, Min(0f)] private float riverWaterSurfaceBelowBank = 0.05f;
     [SerializeField, Min(0f)] private float riverWaterBedClearance = 0.18f;
     [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.05f;
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
@@ -286,6 +297,7 @@ public sealed class TileLoader : MonoBehaviour
             GenerationSettings settings = ResolveGenerationSettings(loadedWorldData.Metadata);
 
             var tileGenerator = new TileGenerator(loadedWorldData.WorldData, loadedWorldData.Seed);
+            ConfigureTileGenerator(tileGenerator);
             CreateOrUpdateTerrains(tileGenerator, loadedWorldData, settings);
             hasLoadedInCurrentEnableCycle = true;
         }
@@ -294,6 +306,27 @@ public sealed class TileLoader : MonoBehaviour
             Debug.LogException(ex, this);
         }
 #endif
+    }
+
+    private void ConfigureTileGenerator(TileGenerator tileGenerator)
+    {
+        tileGenerator.RiverCarveSettings = new RiverCarveSettings
+        {
+            DepthMultiplier = Math.Max(0f, riverDepthMultiplier),
+            BankDepthMultiplier = Math.Max(0f, riverBankDepthMultiplier),
+            CenterDepthMultiplier = Math.Max(0f, riverCenterDepthMultiplier),
+            ChannelProfileExponent = 1f,
+            ShoulderRadiusMultiplier = Math.Max(0.1f, riverCarveWidthMultiplier),
+            ShoulderDepthMultiplier = Math.Max(0f, riverShoulderDepthMultiplier),
+            ShoulderFalloffExponent = 1f,
+            CorridorSmoothingStrength = Mathf.Clamp01(riverCorridorSmoothingStrength),
+            CorridorSmoothingKernelRadius = Math.Max(0, riverCorridorSmoothingKernelRadius),
+            CorridorSmoothingPasses = Math.Max(1, riverCorridorSmoothingPasses),
+            CorridorDepressionMeters = Math.Max(0f, riverCorridorDepressionMeters),
+            CorridorMaxSlopeMetersPerSample = Math.Max(0.05f, riverCorridorMaxSlopeMetersPerSample),
+            CorridorRadiusMultiplier = Math.Max(0.1f, riverCorridorRadiusMultiplier),
+            CorridorMinRadiusSamples = Math.Max(0, riverCorridorMinRadiusSamples),
+        };
     }
 
     private bool ShouldLoadOnEnableInEditMode()
@@ -1352,7 +1385,7 @@ public sealed class TileLoader : MonoBehaviour
             Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
             Mesh? riverMesh = BuildRiverWaterMesh(
                 terrain,
-                request.Layers.Heightmap,
+                request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
                 riverPaths,
                 normalizationMinHeight,
                 normalizationMaxHeight);
@@ -1561,13 +1594,13 @@ public sealed class TileLoader : MonoBehaviour
         {
             RiverSurfacePoint pathPoint = pathPoints[index];
             Vector3 localPoint = GetTerrainLocalPoint(
-                terrain,
+                null,
                 heightmap,
                 pathPoint.X,
                 pathPoint.Y,
                 normalizationMinHeight,
                 normalizationMaxHeight,
-                riverWaterVerticalOffset);
+                0f);
 
             float minSegmentLength = Mathf.Max(0f, riverWaterMinSegmentLength);
             if (centers.Count > 0 && minSegmentLength > 0f)
@@ -1592,45 +1625,12 @@ public sealed class TileLoader : MonoBehaviour
         void ApplyRiverWaterSurfaceHeights()
         {
             float bedClearance = Mathf.Max(0f, riverWaterBedClearance);
-            float belowBank = Mathf.Max(0f, riverWaterSurfaceBelowBank);
-            float bankSampleMultiplier = Mathf.Max(0.1f, riverWaterBankSampleMultiplier);
             var centerBedHeights = new float[centers.Count];
 
             for (int i = 0; i < centers.Count; i++)
             {
                 centerBedHeights[i] = centers[i].y;
-                RiverSurfacePoint pathPoint = sampledPoints[i];
-                (double x, double y) sampleRight = GetRiverWaterSampleRight(
-                    sampledPoints,
-                    i,
-                    tangentSmoothingRadius);
-                float branchT = centers.Count > 1 ? i / (float)(centers.Count - 1) : 0f;
-                float widthFactor = 1f;
-                if (fadeFraction > 0f)
-                {
-                    widthFactor = 1f - Mathf.InverseLerp(1f - fadeFraction, 1f, branchT);
-                }
-
-                double bankSampleDistance = riverPath.HalfWidthPixels * bankSampleMultiplier * Math.Max(0.15, widthFactor);
-                Vector3 leftBank = GetTerrainLocalPoint(
-                    terrain,
-                    heightmap,
-                    pathPoint.X - sampleRight.x * bankSampleDistance,
-                    pathPoint.Y - sampleRight.y * bankSampleDistance,
-                    normalizationMinHeight,
-                    normalizationMaxHeight,
-                    0f);
-                Vector3 rightBank = GetTerrainLocalPoint(
-                    terrain,
-                    heightmap,
-                    pathPoint.X + sampleRight.x * bankSampleDistance,
-                    pathPoint.Y + sampleRight.y * bankSampleDistance,
-                    normalizationMinHeight,
-                    normalizationMaxHeight,
-                    0f);
-
-                float surfaceY = Mathf.Min(leftBank.y, rightBank.y) - belowBank + riverWaterVerticalOffset;
-                surfaceY = Mathf.Max(surfaceY, centerBedHeights[i] + bedClearance);
+                float surfaceY = centerBedHeights[i] + bedClearance;
                 centers[i] = new Vector3(centers[i].x, surfaceY, centers[i].z);
             }
 
@@ -1717,27 +1717,6 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         return tangent.normalized;
-    }
-
-    private static (double x, double y) GetRiverWaterSampleRight(
-        IReadOnlyList<RiverSurfacePoint> sampledPoints,
-        int index,
-        int smoothingRadius)
-    {
-        int radius = Math.Max(1, smoothingRadius);
-        int previousIndex = Math.Max(0, index - radius);
-        int nextIndex = Math.Min(sampledPoints.Count - 1, index + radius);
-        RiverSurfacePoint previous = sampledPoints[previousIndex];
-        RiverSurfacePoint next = sampledPoints[nextIndex];
-        double dx = next.X - previous.X;
-        double dy = next.Y - previous.Y;
-        double length = Math.Sqrt(dx * dx + dy * dy);
-        if (length <= 1e-6)
-        {
-            return (1.0, 0.0);
-        }
-
-        return (-dy / length, dx / length);
     }
 
     private static float HorizontalDistance(Vector3 a, Vector3 b)

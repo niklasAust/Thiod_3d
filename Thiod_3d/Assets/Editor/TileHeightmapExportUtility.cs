@@ -37,6 +37,9 @@ public static class TileHeightmapExportUtility
             string heightmapCsvPath = Path.Combine(OutputDirectory, baseName + "_heightmap.csv");
             string riverDepthCsvPath = Path.Combine(OutputDirectory, baseName + "_river_depth.csv");
             string riverMaskCsvPath = Path.Combine(OutputDirectory, baseName + "_river_mask.csv");
+            string riverFlowXCsvPath = Path.Combine(OutputDirectory, baseName + "_river_flow_x.csv");
+            string riverFlowYCsvPath = Path.Combine(OutputDirectory, baseName + "_river_flow_y.csv");
+            string riverProgressCsvPath = Path.Combine(OutputDirectory, baseName + "_river_progress.csv");
 
             WriteHeightmapPng(layers.Heightmap, heightmapPath);
             WriteDoubleCsv(layers.Heightmap, heightmapCsvPath);
@@ -50,6 +53,17 @@ public static class TileHeightmapExportUtility
             {
                 WriteMaskPng(layers.RiverMask, riverMaskPath);
                 WriteMaskCsv(layers.RiverMask, riverMaskCsvPath);
+            }
+
+            if (layers.RiverFlowX != null && layers.RiverFlowY != null)
+            {
+                WriteDoubleCsv(layers.RiverFlowX, riverFlowXCsvPath);
+                WriteDoubleCsv(layers.RiverFlowY, riverFlowYCsvPath);
+            }
+
+            if (layers.RiverProgressMap != null)
+            {
+                WriteDoubleCsv(layers.RiverProgressMap, riverProgressCsvPath);
             }
 
             AssetDatabase.Refresh();
@@ -88,6 +102,7 @@ public static class TileHeightmapExportUtility
         int worldTileY = invertUnityYForWorldGen ? -unityTileCoordinate.y : unityTileCoordinate.y;
 
         var tileGenerator = new TileGenerator(worldData, seed);
+        InvokeInstanceMethod(loaderType, tileLoader, "ConfigureTileGenerator", tileGenerator);
         return tileGenerator.GenerateTileLayers(
             unityTileCoordinate.x,
             worldTileY,
