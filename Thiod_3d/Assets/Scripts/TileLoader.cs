@@ -120,9 +120,10 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverWaterSurfaceBelowBank = 0.05f;
     [SerializeField, Min(0f)] private float riverWaterBedClearance = 0.18f;
     [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.05f;
-    [SerializeField, Min(1)] private int riverWaterSampleStride = 2;
+    [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
-    [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.2f;
+    [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.05f;
+    [SerializeField, Min(1)] private int riverWaterTangentSmoothingRadius = 4;
 
     [Header("Vegetation Optimization")]
     [SerializeField] private bool optimizeConifersByDistance = true;
@@ -1473,6 +1474,7 @@ public sealed class TileLoader : MonoBehaviour
             (float)riverPath.HalfWidthPixels * metersPerSample * Mathf.Max(0.05f, riverWaterWidthMultiplier));
         float uvLengthScale = Mathf.Max(0.1f, riverWaterUvLengthScale);
         float fadeFraction = Mathf.Clamp01((float)riverPath.FadeFraction);
+        int tangentSmoothingRadius = Math.Max(1, riverWaterTangentSmoothingRadius);
 
         ApplyRiverWaterSurfaceHeights();
 
@@ -1489,7 +1491,7 @@ public sealed class TileLoader : MonoBehaviour
                 downstreamDistance += HorizontalDistance(centers[i - 1], centers[i]);
             }
 
-            Vector3 tangent = GetRiverWaterTangent(centers, sampledPoints, i);
+            Vector3 tangent = GetRiverWaterTangent(centers, sampledPoints, i, tangentSmoothingRadius);
             Vector3 right = new(tangent.z, 0f, -tangent.x);
             if (right.sqrMagnitude <= 0.0001f)
             {
@@ -1598,7 +1600,10 @@ public sealed class TileLoader : MonoBehaviour
             {
                 centerBedHeights[i] = centers[i].y;
                 RiverSurfacePoint pathPoint = sampledPoints[i];
-                (double x, double y) sampleRight = GetRiverWaterSampleRight(sampledPoints, i);
+                (double x, double y) sampleRight = GetRiverWaterSampleRight(
+                    sampledPoints,
+                    i,
+                    tangentSmoothingRadius);
                 float branchT = centers.Count > 1 ? i / (float)(centers.Count - 1) : 0f;
                 float widthFactor = 1f;
                 if (fadeFraction > 0f)
@@ -1691,10 +1696,12 @@ public sealed class TileLoader : MonoBehaviour
     private static Vector3 GetRiverWaterTangent(
         IReadOnlyList<Vector3> centers,
         IReadOnlyList<RiverSurfacePoint> sampledPoints,
-        int index)
+        int index,
+        int smoothingRadius)
     {
-        int previousIndex = Math.Max(0, index - 1);
-        int nextIndex = Math.Min(centers.Count - 1, index + 1);
+        int radius = Math.Max(1, smoothingRadius);
+        int previousIndex = Math.Max(0, index - radius);
+        int nextIndex = Math.Min(centers.Count - 1, index + radius);
         Vector3 tangent = centers[nextIndex] - centers[previousIndex];
         tangent.y = 0f;
         if (tangent.sqrMagnitude <= 0.0001f && sampledPoints.Count == centers.Count)
@@ -1712,10 +1719,14 @@ public sealed class TileLoader : MonoBehaviour
         return tangent.normalized;
     }
 
-    private static (double x, double y) GetRiverWaterSampleRight(IReadOnlyList<RiverSurfacePoint> sampledPoints, int index)
+    private static (double x, double y) GetRiverWaterSampleRight(
+        IReadOnlyList<RiverSurfacePoint> sampledPoints,
+        int index,
+        int smoothingRadius)
     {
-        int previousIndex = Math.Max(0, index - 1);
-        int nextIndex = Math.Min(sampledPoints.Count - 1, index + 1);
+        int radius = Math.Max(1, smoothingRadius);
+        int previousIndex = Math.Max(0, index - radius);
+        int nextIndex = Math.Min(sampledPoints.Count - 1, index + radius);
         RiverSurfacePoint previous = sampledPoints[previousIndex];
         RiverSurfacePoint next = sampledPoints[nextIndex];
         double dx = next.X - previous.X;
