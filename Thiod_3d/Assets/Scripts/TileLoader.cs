@@ -33,6 +33,8 @@ public sealed class TileLoader : MonoBehaviour
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/rocks 3.mat";
     private const string DefaultPeakTerrainMaterialAssetPath =
         "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Terrain/Terrain_Materials/snow.mat";
+    private const string DefaultRiverWaterMaterialAssetPath =
+        "Assets/Stylized Water 3/Materials/StylizedWater3_River.mat";
     private const double PreviewMaxElevationMeters = 2000.0;
     private const double MaxTileHeightUnits = 42.0;
     private const double MetersPerTileHeightUnit = PreviewMaxElevationMeters / MaxTileHeightUnits;
@@ -106,6 +108,21 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float treeObjectVerticalOffset = 0f;
     [FormerlySerializedAs("grassClusterVerticalOffset")]
     [SerializeField] private float surfaceObjectVerticalOffset = 0f;
+
+    [Header("River Water Output")]
+    [SerializeField] private bool createRiverWater = true;
+    [SerializeField] private string generatedRiverWaterContainerName = "Rivers";
+    [SerializeField] private Material? riverWaterMaterial;
+    [SerializeField] private string riverWaterMaterialAssetPath = DefaultRiverWaterMaterialAssetPath;
+    [SerializeField] private float riverWaterVerticalOffset = 0.18f;
+    [SerializeField, Min(0.05f)] private float riverWaterWidthMultiplier = 1.45f;
+    [SerializeField, Min(0.1f)] private float riverWaterBankSampleMultiplier = 1.35f;
+    [SerializeField, Min(0f)] private float riverWaterSurfaceBelowBank = 0.05f;
+    [SerializeField, Min(0f)] private float riverWaterBedClearance = 0.18f;
+    [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.05f;
+    [SerializeField, Min(1)] private int riverWaterSampleStride = 2;
+    [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
+    [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.2f;
 
     [Header("Vegetation Optimization")]
     [SerializeField] private bool optimizeConifersByDistance = true;
@@ -424,6 +441,7 @@ public sealed class TileLoader : MonoBehaviour
         {
             RebuildTerrainSeams(createdTerrains);
             ApplyTerrainShading(createdTerrains);
+            PopulateRiverWater(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
             PopulateVegetation(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
             if (Application.isPlaying)
             {
@@ -1291,6 +1309,384 @@ public sealed class TileLoader : MonoBehaviour
 
         RebuildTerrainSeams(terrains);
         ApplyTerrainShading(terrains);
+    }
+
+    private void PopulateRiverWater(
+        IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
+        IReadOnlyList<GStylizedTerrain> terrains,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        if (!createRiverWater)
+        {
+            return;
+        }
+
+        Material? waterMaterial = null;
+        int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
+        for (int i = 0; i < terrainCount; i++)
+        {
+            GeneratedTerrainRequest request = terrainRequests[i];
+            IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
+            if (riverPaths.Count == 0)
+            {
+                continue;
+            }
+
+            waterMaterial ??= ResolveRiverWaterMaterial();
+            if (waterMaterial == null)
+            {
+                Debug.LogWarning(
+                    $"TileLoader could not resolve the Stylized Water river material at '{GetRiverWaterMaterialAssetPath()}'. Generated river meshes were skipped.",
+                    this);
+                return;
+            }
+
+            GStylizedTerrain terrain = terrains[i];
+            if (terrain == null)
+            {
+                continue;
+            }
+
+            Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
+            for (int pathIndex = 0; pathIndex < riverPaths.Count; pathIndex++)
+            {
+                Mesh? riverMesh = BuildRiverWaterMesh(
+                    terrain,
+                    request.Layers.Heightmap,
+                    riverPaths[pathIndex],
+                    normalizationMinHeight,
+                    normalizationMaxHeight);
+                if (riverMesh == null)
+                {
+                    continue;
+                }
+
+                var riverObject = new GameObject($"RiverWater_{pathIndex:00}");
+                riverObject.transform.SetParent(riverContainer, false);
+                riverObject.transform.localPosition = Vector3.zero;
+                riverObject.transform.localRotation = Quaternion.identity;
+                riverObject.transform.localScale = Vector3.one;
+                ApplyRiverWaterLayer(riverObject);
+
+                MeshFilter meshFilter = riverObject.AddComponent<MeshFilter>();
+                meshFilter.sharedMesh = riverMesh;
+
+                MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
+                meshRenderer.sharedMaterial = waterMaterial;
+                meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+                meshRenderer.receiveShadows = false;
+            }
+        }
+    }
+
+    private Mesh? BuildRiverWaterMesh(
+        GStylizedTerrain? terrain,
+        double[,] heightmap,
+        RiverSurfacePath riverPath,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        IReadOnlyList<RiverSurfacePoint> pathPoints = riverPath.Points;
+        if (pathPoints.Count < 2 || riverPath.HalfWidthPixels <= 0.0)
+        {
+            return null;
+        }
+
+        var centers = new List<Vector3>();
+        var sampledPoints = new List<RiverSurfacePoint>();
+        int stride = Math.Max(1, riverWaterSampleStride);
+        for (int i = 0; i < pathPoints.Count; i += stride)
+        {
+            AddRiverWaterSample(i, force: false);
+        }
+
+        AddRiverWaterSample(pathPoints.Count - 1, force: true);
+
+        if (centers.Count < 2)
+        {
+            return null;
+        }
+
+        int heightResolution = heightmap.GetLength(0);
+        int widthResolution = heightmap.GetLength(1);
+        float sampleSpacingX = widthResolution > 1 ? terrainWidth / (widthResolution - 1) : terrainWidth;
+        float sampleSpacingZ = heightResolution > 1 ? terrainLength / (heightResolution - 1) : terrainLength;
+        float metersPerSample = Mathf.Max(0.001f, (sampleSpacingX + sampleSpacingZ) * 0.5f);
+        float baseHalfWidth = Mathf.Max(
+            0.05f,
+            (float)riverPath.HalfWidthPixels * metersPerSample * Mathf.Max(0.05f, riverWaterWidthMultiplier));
+        float uvLengthScale = Mathf.Max(0.1f, riverWaterUvLengthScale);
+        float fadeFraction = Mathf.Clamp01((float)riverPath.FadeFraction);
+
+        ApplyRiverWaterSurfaceHeights();
+
+        var vertices = new List<Vector3>(centers.Count * 2);
+        var uvs = new List<Vector2>(centers.Count * 2);
+        var colors = new List<Color>(centers.Count * 2);
+        var triangles = new List<int>(Mathf.Max(0, centers.Count - 1) * 6);
+        float downstreamDistance = 0f;
+
+        for (int i = 0; i < centers.Count; i++)
+        {
+            if (i > 0)
+            {
+                downstreamDistance += HorizontalDistance(centers[i - 1], centers[i]);
+            }
+
+            Vector3 tangent = GetRiverWaterTangent(centers, sampledPoints, i);
+            Vector3 right = new(tangent.z, 0f, -tangent.x);
+            if (right.sqrMagnitude <= 0.0001f)
+            {
+                right = Vector3.right;
+            }
+            else
+            {
+                right.Normalize();
+            }
+
+            float branchT = centers.Count > 1 ? i / (float)(centers.Count - 1) : 0f;
+            float widthFactor = 1f;
+            if (fadeFraction > 0f)
+            {
+                widthFactor = 1f - Mathf.InverseLerp(1f - fadeFraction, 1f, branchT);
+            }
+
+            float halfWidth = baseHalfWidth * Mathf.Clamp01(widthFactor);
+            Vector3 leftVertex = centers[i] - right * halfWidth;
+            Vector3 rightVertex = centers[i] + right * halfWidth;
+            float uvY = downstreamDistance / uvLengthScale;
+
+            vertices.Add(leftVertex);
+            vertices.Add(rightVertex);
+            uvs.Add(new Vector2(0f, uvY));
+            uvs.Add(new Vector2(1f, uvY));
+            colors.Add(Color.white);
+            colors.Add(Color.white);
+
+            if (i == 0)
+            {
+                continue;
+            }
+
+            int left0 = (i - 1) * 2;
+            int right0 = left0 + 1;
+            int left1 = i * 2;
+            int right1 = left1 + 1;
+            triangles.Add(left0);
+            triangles.Add(left1);
+            triangles.Add(right0);
+            triangles.Add(right0);
+            triangles.Add(left1);
+            triangles.Add(right1);
+        }
+
+        var mesh = new Mesh
+        {
+            name = "Generated River Water Mesh"
+        };
+        if (vertices.Count > ushort.MaxValue)
+        {
+            mesh.indexFormat = IndexFormat.UInt32;
+        }
+
+        mesh.SetVertices(vertices);
+        mesh.SetUVs(0, uvs);
+        mesh.SetColors(colors);
+        mesh.SetTriangles(triangles, 0);
+        mesh.RecalculateBounds();
+        mesh.RecalculateNormals();
+        mesh.RecalculateTangents();
+        return mesh;
+
+        void AddRiverWaterSample(int index, bool force)
+        {
+            RiverSurfacePoint pathPoint = pathPoints[index];
+            Vector3 localPoint = GetTerrainLocalPoint(
+                terrain,
+                heightmap,
+                pathPoint.X,
+                pathPoint.Y,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                riverWaterVerticalOffset);
+
+            float minSegmentLength = Mathf.Max(0f, riverWaterMinSegmentLength);
+            if (centers.Count > 0 && minSegmentLength > 0f)
+            {
+                float minSegmentSqr = minSegmentLength * minSegmentLength;
+                if ((localPoint - centers[^1]).sqrMagnitude < minSegmentSqr)
+                {
+                    if (force)
+                    {
+                        centers[^1] = localPoint;
+                        sampledPoints[^1] = pathPoint;
+                    }
+
+                    return;
+                }
+            }
+
+            centers.Add(localPoint);
+            sampledPoints.Add(pathPoint);
+        }
+
+        void ApplyRiverWaterSurfaceHeights()
+        {
+            float bedClearance = Mathf.Max(0f, riverWaterBedClearance);
+            float belowBank = Mathf.Max(0f, riverWaterSurfaceBelowBank);
+            float bankSampleMultiplier = Mathf.Max(0.1f, riverWaterBankSampleMultiplier);
+            var centerBedHeights = new float[centers.Count];
+
+            for (int i = 0; i < centers.Count; i++)
+            {
+                centerBedHeights[i] = centers[i].y;
+                RiverSurfacePoint pathPoint = sampledPoints[i];
+                (double x, double y) sampleRight = GetRiverWaterSampleRight(sampledPoints, i);
+                float branchT = centers.Count > 1 ? i / (float)(centers.Count - 1) : 0f;
+                float widthFactor = 1f;
+                if (fadeFraction > 0f)
+                {
+                    widthFactor = 1f - Mathf.InverseLerp(1f - fadeFraction, 1f, branchT);
+                }
+
+                double bankSampleDistance = riverPath.HalfWidthPixels * bankSampleMultiplier * Math.Max(0.15, widthFactor);
+                Vector3 leftBank = GetTerrainLocalPoint(
+                    terrain,
+                    heightmap,
+                    pathPoint.X - sampleRight.x * bankSampleDistance,
+                    pathPoint.Y - sampleRight.y * bankSampleDistance,
+                    normalizationMinHeight,
+                    normalizationMaxHeight,
+                    0f);
+                Vector3 rightBank = GetTerrainLocalPoint(
+                    terrain,
+                    heightmap,
+                    pathPoint.X + sampleRight.x * bankSampleDistance,
+                    pathPoint.Y + sampleRight.y * bankSampleDistance,
+                    normalizationMinHeight,
+                    normalizationMaxHeight,
+                    0f);
+
+                float surfaceY = Mathf.Min(leftBank.y, rightBank.y) - belowBank + riverWaterVerticalOffset;
+                surfaceY = Mathf.Max(surfaceY, centerBedHeights[i] + bedClearance);
+                centers[i] = new Vector3(centers[i].x, surfaceY, centers[i].z);
+            }
+
+            float dropPerSegment = centers.Count > 1
+                ? Mathf.Max(0f, riverWaterMinimumDownstreamDrop) / (centers.Count - 1)
+                : 0f;
+            for (int i = 1; i < centers.Count; i++)
+            {
+                float maxDownstreamSurfaceY = centers[i - 1].y - dropPerSegment;
+                if (centers[i].y > maxDownstreamSurfaceY)
+                {
+                    centers[i] = new Vector3(centers[i].x, maxDownstreamSurfaceY, centers[i].z);
+                }
+            }
+        }
+    }
+
+    private Transform CreateRiverWaterContainer(Transform terrainTransform)
+    {
+        string containerName = string.IsNullOrWhiteSpace(generatedRiverWaterContainerName)
+            ? "Rivers"
+            : generatedRiverWaterContainerName.Trim();
+        Transform existing = terrainTransform.Find(containerName);
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        var container = new GameObject(containerName);
+        container.transform.SetParent(terrainTransform, false);
+        container.transform.localPosition = Vector3.zero;
+        container.transform.localRotation = Quaternion.identity;
+        container.transform.localScale = Vector3.one;
+        ApplyRiverWaterLayer(container);
+        return container.transform;
+    }
+
+    private Material? ResolveRiverWaterMaterial()
+    {
+        if (riverWaterMaterial != null)
+        {
+            return riverWaterMaterial;
+        }
+
+#if UNITY_EDITOR
+        Material material = AssetDatabase.LoadAssetAtPath<Material>(GetRiverWaterMaterialAssetPath());
+        if (material != null)
+        {
+            return material;
+        }
+#endif
+
+        return null;
+    }
+
+    private string GetRiverWaterMaterialAssetPath()
+    {
+        return string.IsNullOrWhiteSpace(riverWaterMaterialAssetPath)
+            ? DefaultRiverWaterMaterialAssetPath
+            : riverWaterMaterialAssetPath.Replace('\\', '/').Trim();
+    }
+
+    private static Vector3 GetRiverWaterTangent(
+        IReadOnlyList<Vector3> centers,
+        IReadOnlyList<RiverSurfacePoint> sampledPoints,
+        int index)
+    {
+        int previousIndex = Math.Max(0, index - 1);
+        int nextIndex = Math.Min(centers.Count - 1, index + 1);
+        Vector3 tangent = centers[nextIndex] - centers[previousIndex];
+        tangent.y = 0f;
+        if (tangent.sqrMagnitude <= 0.0001f && sampledPoints.Count == centers.Count)
+        {
+            RiverSurfacePoint previous = sampledPoints[previousIndex];
+            RiverSurfacePoint next = sampledPoints[nextIndex];
+            tangent = new Vector3((float)(next.X - previous.X), 0f, (float)(previous.Y - next.Y));
+        }
+
+        if (tangent.sqrMagnitude <= 0.0001f)
+        {
+            return Vector3.forward;
+        }
+
+        return tangent.normalized;
+    }
+
+    private static (double x, double y) GetRiverWaterSampleRight(IReadOnlyList<RiverSurfacePoint> sampledPoints, int index)
+    {
+        int previousIndex = Math.Max(0, index - 1);
+        int nextIndex = Math.Min(sampledPoints.Count - 1, index + 1);
+        RiverSurfacePoint previous = sampledPoints[previousIndex];
+        RiverSurfacePoint next = sampledPoints[nextIndex];
+        double dx = next.X - previous.X;
+        double dy = next.Y - previous.Y;
+        double length = Math.Sqrt(dx * dx + dy * dy);
+        if (length <= 1e-6)
+        {
+            return (1.0, 0.0);
+        }
+
+        return (-dy / length, dx / length);
+    }
+
+    private static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        float dx = b.x - a.x;
+        float dz = b.z - a.z;
+        return Mathf.Sqrt(dx * dx + dz * dz);
+    }
+
+    private static void ApplyRiverWaterLayer(GameObject target)
+    {
+        int waterLayer = LayerMask.NameToLayer("Water");
+        if (waterLayer >= 0)
+        {
+            target.layer = waterLayer;
+        }
     }
 
     private void PopulateVegetation(
