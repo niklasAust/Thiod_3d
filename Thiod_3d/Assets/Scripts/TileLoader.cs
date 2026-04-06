@@ -629,7 +629,7 @@ public sealed class TileLoader : MonoBehaviour
             return;
         }
 
-        float[,] normalizedHeights = BuildNormalizedHeights(sourceHeightmap, normalizationMinHeight, normalizationMaxHeight);
+        float[,] normalizedHeights = BuildNormalizedHeights(sourceHeightmap);
         float[,] heightMeters = BuildHeightMeters(sourceHeightmap);
         ApplyTextureBlendSettings(
             terrainData.Shading,
@@ -674,12 +674,10 @@ public sealed class TileLoader : MonoBehaviour
 
         float[,] normalizedHeights = DecodeNormalizedHeights(heightTexture);
         GeneratedTerrainShadingMetadata? shadingMetadata = GetTerrainShadingMetadata(terrain.name);
-        float[,] heightMeters = shadingMetadata.HasValue
-            ? BuildHeightMetersFromNormalizedHeights(
-                normalizedHeights,
-                shadingMetadata.Value.NormalizationMinHeight,
-                shadingMetadata.Value.NormalizationMaxHeight)
-            : BuildHeightMetersFromNormalizedHeights(normalizedHeights, 0.0, MaxTileHeightUnits);
+        float[,] heightMeters = BuildHeightMetersFromNormalizedHeights(
+            normalizedHeights,
+            0.0,
+            MaxTileHeightUnits);
         float localMaxHeightMeters = shadingMetadata.HasValue && shadingMetadata.Value.LocalMaxHeightMeters > 0f
             ? shadingMetadata.Value.LocalMaxHeightMeters
             : EstimateMaxHeightMeters(heightMeters);
@@ -883,18 +881,17 @@ public sealed class TileLoader : MonoBehaviour
             : fallback;
     }
 
-    private static float[,] BuildNormalizedHeights(double[,] sourceHeightmap, double minHeight, double maxHeight)
+    private static float[,] BuildNormalizedHeights(double[,] sourceHeightmap)
     {
         int resolutionY = sourceHeightmap.GetLength(0);
         int resolutionX = sourceHeightmap.GetLength(1);
         var normalizedHeights = new float[resolutionY, resolutionX];
-        double range = Math.Max(maxHeight - minHeight, 1e-6);
 
         for (int y = 0; y < resolutionY; y++)
         {
             for (int x = 0; x < resolutionX; x++)
             {
-                normalizedHeights[y, x] = Mathf.Clamp01((float)((sourceHeightmap[y, x] - minHeight) / range));
+                normalizedHeights[y, x] = NormalizeHeightUnitsToTerrain(sourceHeightmap[y, x]);
             }
         }
 
@@ -1360,6 +1357,7 @@ public sealed class TileLoader : MonoBehaviour
             if (isTreeObject)
             {
                 instance.transform.localPosition = GetPlacementLocalPosition(
+                    terrain,
                     request.Layers.Heightmap,
                     placement,
                     normalizationMinHeight,
@@ -1490,6 +1488,7 @@ public sealed class TileLoader : MonoBehaviour
     }
 
     private Vector3 GetPlacementLocalPosition(
+        GStylizedTerrain? terrain,
         double[,] heightmap,
         TileObjectPlacement placement,
         double normalizationMinHeight,
@@ -1497,6 +1496,7 @@ public sealed class TileLoader : MonoBehaviour
         float verticalOffset)
     {
         return GetTerrainLocalPoint(
+            terrain,
             heightmap,
             placement.X,
             placement.Y,
@@ -1506,6 +1506,7 @@ public sealed class TileLoader : MonoBehaviour
     }
 
     private Vector3 GetTerrainLocalPoint(
+        GStylizedTerrain? terrain,
         double[,] heightmap,
         double sampleX,
         double sampleY,
@@ -1524,12 +1525,18 @@ public sealed class TileLoader : MonoBehaviour
 
         float localX = normalizedX * terrainWidth;
         float localZ = (1f - normalizedY) * terrainLength;
+        if (TrySampleGeneratedTerrainLocalPoint(terrain, localX, localZ, verticalOffset, out Vector3 terrainPoint))
+        {
+            return terrainPoint;
+        }
+
         float localY = SampleTerrainHeight(heightmap, sampleX, sampleY, normalizationMinHeight, normalizationMaxHeight) +
                        verticalOffset;
         return new Vector3(localX, localY, localZ);
     }
 
     private Vector3 GetTerrainLocalNormal(
+        GStylizedTerrain? terrain,
         double[,] heightmap,
         double sampleX,
         double sampleY,
@@ -1544,6 +1551,7 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         Vector3 pointLeft = GetTerrainLocalPoint(
+            terrain,
             heightmap,
             sampleX - 1d,
             sampleY,
@@ -1551,6 +1559,7 @@ public sealed class TileLoader : MonoBehaviour
             normalizationMaxHeight,
             0f);
         Vector3 pointRight = GetTerrainLocalPoint(
+            terrain,
             heightmap,
             sampleX + 1d,
             sampleY,
@@ -1558,6 +1567,7 @@ public sealed class TileLoader : MonoBehaviour
             normalizationMaxHeight,
             0f);
         Vector3 pointBack = GetTerrainLocalPoint(
+            terrain,
             heightmap,
             sampleX,
             sampleY - 1d,
@@ -1565,6 +1575,7 @@ public sealed class TileLoader : MonoBehaviour
             normalizationMaxHeight,
             0f);
         Vector3 pointForward = GetTerrainLocalPoint(
+            terrain,
             heightmap,
             sampleX,
             sampleY + 1d,
@@ -1591,8 +1602,7 @@ public sealed class TileLoader : MonoBehaviour
         double normalizationMaxHeight)
     {
         double rawHeight = SampleHeightmapBilinear(heightmap, sampleX, sampleY);
-        double normalizationRange = Math.Max(normalizationMaxHeight - normalizationMinHeight, 1e-6);
-        float normalizedHeight = Mathf.Clamp01((float)((rawHeight - normalizationMinHeight) / normalizationRange));
+        float normalizedHeight = NormalizeHeightUnitsToTerrain(rawHeight);
         return normalizedHeight * terrainHeight;
     }
 
@@ -1730,13 +1740,16 @@ public sealed class TileLoader : MonoBehaviour
             return;
         }
 
+        GStylizedTerrain terrain = surfaceObjectTransform.GetComponentInParent<GStylizedTerrain>();
         Vector3 localSurfacePoint = GetPlacementLocalPosition(
+            terrain,
             heightmap,
             placement,
             normalizationMinHeight,
             normalizationMaxHeight,
             surfaceObjectVerticalOffset);
         Vector3 localSurfaceNormal = GetTerrainLocalNormal(
+            terrain,
             heightmap,
             placement.X,
             placement.Y,
@@ -1767,6 +1780,30 @@ public sealed class TileLoader : MonoBehaviour
     private float GetSurfaceObjectOffset()
     {
         return grassClusterConformSurfaceOffset;
+    }
+
+    private bool TrySampleGeneratedTerrainLocalPoint(
+        GStylizedTerrain? terrain,
+        float localX,
+        float localZ,
+        float verticalOffset,
+        out Vector3 localPoint)
+    {
+        localPoint = default;
+        if (terrain == null || !terrain.isActiveAndEnabled || terrain.TerrainData == null)
+        {
+            return false;
+        }
+
+        Vector3 worldOrigin = terrain.transform.TransformPoint(new Vector3(localX, terrainHeight + 32f, localZ));
+        if (!terrain.Raycast(new Ray(worldOrigin, Vector3.down), out RaycastHit terrainHit, terrainHeight + 96f))
+        {
+            return false;
+        }
+
+        Vector3 worldPoint = terrainHit.point + terrain.transform.up * verticalOffset;
+        localPoint = terrain.transform.InverseTransformPoint(worldPoint);
+        return true;
     }
 
     private static bool TrySampleSurfaceObjectSurface(Transform surfaceObjectTransform, out RaycastHit surfaceHit)
@@ -2285,20 +2322,24 @@ public sealed class TileLoader : MonoBehaviour
     {
         int resolutionY = heightmap.GetLength(0);
         int resolutionX = heightmap.GetLength(1);
-        double range = Math.Max(maxHeight - minHeight, 1e-6);
         var pixels = new Color[resolutionX * resolutionY];
 
         for (int y = 0; y < resolutionY; y++)
         {
             for (int x = 0; x < resolutionX; x++)
             {
-                float normalizedHeight = Mathf.Clamp01((float)((heightmap[y, x] - minHeight) / range));
+                float normalizedHeight = NormalizeHeightUnitsToTerrain(heightmap[y, x]);
                 int flippedY = resolutionY - 1 - y;
                 pixels[flippedY * resolutionX + x] = Polaris.EncodeHeightMapSample(normalizedHeight, 0f, 0f);
             }
         }
 
         return pixels;
+    }
+
+    private static float NormalizeHeightUnitsToTerrain(double heightUnits)
+    {
+        return Mathf.Clamp01((float)(heightUnits / Math.Max(MaxTileHeightUnits, 1e-6)));
     }
 
     private static void CalculateHeightRange(double[,] heightmap, out double minHeight, out double maxHeight)
