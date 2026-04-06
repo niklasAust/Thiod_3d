@@ -66,6 +66,10 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverDepthMultiplier = 0.18f;
     [SerializeField, Min(0f)] private float riverBankDepthMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverCenterDepthMultiplier = 0f;
+    [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingStrength = 0.35f;
+    [SerializeField, Min(1)] private int riverCenterCarveSmoothingKernelRadius = 2;
+    [SerializeField, Min(1)] private int riverCenterCarveSmoothingPasses = 1;
+    [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingRetainedDepthFraction = 0.35f;
     [SerializeField, Min(0.1f)] private float riverCarveWidthMultiplier = 1.5f;
     [SerializeField, Min(0f)] private float riverShoulderDepthMultiplier = 2f;
 
@@ -133,6 +137,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.05f;
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
+    [SerializeField, Min(0.1f)] private float riverWaterUvWidthScale = 24f;
     [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.05f;
     [SerializeField, Min(1)] private int riverWaterTangentSmoothingRadius = 4;
 
@@ -326,6 +331,10 @@ public sealed class TileLoader : MonoBehaviour
             CorridorMaxSlopeMetersPerSample = Math.Max(0.05f, riverCorridorMaxSlopeMetersPerSample),
             CorridorRadiusMultiplier = Math.Max(0.1f, riverCorridorRadiusMultiplier),
             CorridorMinRadiusSamples = Math.Max(0, riverCorridorMinRadiusSamples),
+            CenterSmoothingStrength = Mathf.Clamp01(riverCenterCarveSmoothingStrength),
+            CenterSmoothingKernelRadius = Math.Max(1, riverCenterCarveSmoothingKernelRadius),
+            CenterSmoothingPasses = Math.Max(1, riverCenterCarveSmoothingPasses),
+            CenterSmoothingRetainedDepthFraction = Mathf.Clamp01(riverCenterCarveSmoothingRetainedDepthFraction),
         };
     }
 
@@ -1506,6 +1515,7 @@ public sealed class TileLoader : MonoBehaviour
             0.05f,
             (float)riverPath.HalfWidthPixels * metersPerSample * Mathf.Max(0.05f, riverWaterWidthMultiplier));
         float uvLengthScale = Mathf.Max(0.1f, riverWaterUvLengthScale);
+        float uvWidthScale = Mathf.Max(0.1f, riverWaterUvWidthScale);
         float fadeFraction = Mathf.Clamp01((float)riverPath.FadeFraction);
         int tangentSmoothingRadius = Math.Max(1, riverWaterTangentSmoothingRadius);
 
@@ -1545,7 +1555,7 @@ public sealed class TileLoader : MonoBehaviour
             float halfWidth = baseHalfWidth * Mathf.Clamp01(widthFactor);
             Vector3 leftVertex = centers[i] - right * halfWidth;
             Vector3 rightVertex = centers[i] + right * halfWidth;
-            float uvXHalfWidth = halfWidth / uvLengthScale;
+            float uvXHalfWidth = halfWidth / uvWidthScale;
             float uvY = -downstreamDistance / uvLengthScale;
 
             vertices.Add(leftVertex);
