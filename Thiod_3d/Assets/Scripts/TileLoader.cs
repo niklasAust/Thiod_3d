@@ -63,6 +63,8 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0.05f)] private float riverCorridorMaxSlopeMetersPerSample = 1.25f;
     [SerializeField, Min(0.1f)] private float riverCorridorRadiusMultiplier = 1.25f;
     [SerializeField, Min(0)] private int riverCorridorMinRadiusSamples = 16;
+    [SerializeField, Range(0f, 1f)] private float riverCorridorFillOuterFeatherStart = 0.72f;
+    [SerializeField, Range(0f, 1f)] private float riverCorridorFillOuterFeatherStrength = 1f;
     [SerializeField, Min(0f)] private float riverDepthMultiplier = 0.18f;
     [SerializeField, Min(0f)] private float riverBankDepthMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverCenterDepthMultiplier = 0f;
@@ -345,6 +347,8 @@ public sealed class TileLoader : MonoBehaviour
             CorridorMaxSlopeMetersPerSample = Math.Max(0.05f, riverCorridorMaxSlopeMetersPerSample),
             CorridorRadiusMultiplier = Math.Max(0.1f, riverCorridorRadiusMultiplier),
             CorridorMinRadiusSamples = Math.Max(0, riverCorridorMinRadiusSamples),
+            CorridorFillOuterFeatherStart = Mathf.Clamp01(riverCorridorFillOuterFeatherStart),
+            CorridorFillOuterFeatherStrength = Mathf.Clamp01(riverCorridorFillOuterFeatherStrength),
             CenterSmoothingStrength = Mathf.Clamp01(riverCenterCarveSmoothingStrength),
             CenterSmoothingKernelRadius = Math.Max(1, riverCenterCarveSmoothingKernelRadius),
             CenterSmoothingPasses = Math.Max(1, riverCenterCarveSmoothingPasses),
@@ -1380,6 +1384,7 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         Material? waterMaterial = null;
+        var riverWaterSeams = new Dictionary<string, RiverWaterSeamCrossSection>(StringComparer.Ordinal);
         int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
         for (int i = 0; i < terrainCount; i++)
         {
@@ -1410,6 +1415,8 @@ public sealed class TileLoader : MonoBehaviour
                 terrain,
                 request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
                 riverPaths,
+                request.Layers.RiverInfo,
+                riverWaterSeams,
                 request.Layers.RiverUsesGlobalProfile,
                 normalizationMinHeight,
                 normalizationMaxHeight);
@@ -1474,6 +1481,8 @@ public sealed class TileLoader : MonoBehaviour
         GStylizedTerrain? terrain,
         double[,] heightmap,
         IReadOnlyList<RiverSurfacePath> riverPaths,
+        RiverInfo? riverInfo,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
         bool usesGlobalRiverProfile,
         double normalizationMinHeight,
         double normalizationMaxHeight)
@@ -1487,6 +1496,8 @@ public sealed class TileLoader : MonoBehaviour
                 terrain,
                 heightmap,
                 riverPaths[i],
+                riverInfo,
+                riverWaterSeams,
                 usesGlobalRiverProfile,
                 normalizationMinHeight,
                 normalizationMaxHeight);
@@ -1534,6 +1545,8 @@ public sealed class TileLoader : MonoBehaviour
         GStylizedTerrain? terrain,
         double[,] heightmap,
         RiverSurfacePath riverPath,
+        RiverInfo? riverInfo,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
         bool usesGlobalRiverProfile,
         double normalizationMinHeight,
         double normalizationMaxHeight)
@@ -1546,6 +1559,7 @@ public sealed class TileLoader : MonoBehaviour
 
         var centers = new List<Vector3>();
         var sampledPoints = new List<RiverSurfacePoint>();
+        var sampleSeams = new List<(bool IsSeam, string? Direction, bool IsStart)>();
         int stride = Math.Max(1, riverWaterSampleStride);
         for (int i = 0; i < pathPoints.Count; i += stride)
         {
@@ -1573,6 +1587,8 @@ public sealed class TileLoader : MonoBehaviour
         int tangentSmoothingRadius = Math.Max(1, riverWaterTangentSmoothingRadius);
 
         ApplyRiverWaterSurfaceHeights();
+        ApplyRiverWaterSeamCenterCache();
+        SmoothRiverWaterSeamAdjacentHeights();
 
         var vertices = new List<Vector3>(centers.Count * 2);
         var uvs = new List<Vector2>(centers.Count * 2);
@@ -1588,6 +1604,16 @@ public sealed class TileLoader : MonoBehaviour
             }
 
             Vector3 tangent = GetRiverWaterTangent(centers, sampledPoints, i, tangentSmoothingRadius);
+            var seam = GetTileEdgeSeamInfluence(i);
+            bool isTileEdgeSeam = seam.IsSeam && seam.Weight >= 0.999f;
+            if (seam.IsSeam &&
+                TryGetRiverWaterSeamTangent(seam.Direction, seam.IsStart, out Vector3 seamTangent))
+            {
+                tangent = isTileEdgeSeam
+                    ? seamTangent
+                    : Vector3.Slerp(tangent, seamTangent, Mathf.Clamp01(seam.Weight)).normalized;
+            }
+
             Vector3 right = new(tangent.z, 0f, -tangent.x);
             if (right.sqrMagnitude <= 0.0001f)
             {
@@ -1605,9 +1631,16 @@ public sealed class TileLoader : MonoBehaviour
                 widthFactor = 1f - Mathf.InverseLerp(1f - fadeFraction, 1f, branchT);
             }
 
-            float halfWidth = baseHalfWidth * Mathf.Clamp01(widthFactor);
+            float halfWidth = isTileEdgeSeam
+                ? GetRiverWaterSeamHalfWidth(seam.Direction, seam.IsStart, baseHalfWidth, metersPerSample)
+                : baseHalfWidth * Mathf.Clamp01(widthFactor);
             Vector3 leftVertex = centers[i] - right * halfWidth;
             Vector3 rightVertex = centers[i] + right * halfWidth;
+            if (isTileEdgeSeam)
+            {
+                ApplyRiverWaterSeamCache(terrain, centers[i], riverWaterSeams, ref leftVertex, ref rightVertex);
+            }
+
             float uvY = -downstreamDistance / uvLengthScale;
 
             vertices.Add(leftVertex);
@@ -1655,6 +1688,7 @@ public sealed class TileLoader : MonoBehaviour
         void AddRiverWaterSample(int index, bool force)
         {
             RiverSurfacePoint pathPoint = pathPoints[index];
+            var seam = GetEndpointSeamForPathIndex(index, pathPoint);
             Vector3 localPoint = GetTerrainLocalPoint(
                 null,
                 heightmap,
@@ -1674,6 +1708,7 @@ public sealed class TileLoader : MonoBehaviour
                     {
                         centers[^1] = localPoint;
                         sampledPoints[^1] = pathPoint;
+                        sampleSeams[^1] = seam;
                     }
 
                     return;
@@ -1682,6 +1717,7 @@ public sealed class TileLoader : MonoBehaviour
 
             centers.Add(localPoint);
             sampledPoints.Add(pathPoint);
+            sampleSeams.Add(seam);
         }
 
         void ApplyRiverWaterSurfaceHeights()
@@ -1707,12 +1743,161 @@ public sealed class TileLoader : MonoBehaviour
                 : 0f;
             for (int i = 1; i < centers.Count; i++)
             {
+                if (GetTileEdgeSeam(i).IsSeam)
+                {
+                    continue;
+                }
+
                 float maxDownstreamSurfaceY = centers[i - 1].y - dropPerSegment;
                 if (centers[i].y > maxDownstreamSurfaceY)
                 {
                     centers[i] = new Vector3(centers[i].x, maxDownstreamSurfaceY, centers[i].z);
                 }
             }
+        }
+
+        (bool IsSeam, string? Direction, bool IsStart) GetEndpointSeamForPathIndex(
+            int index,
+            RiverSurfacePoint pathPoint)
+        {
+            bool isStart = index == 0;
+            if (!isStart && index != pathPoints.Count - 1)
+            {
+                return default;
+            }
+
+            if (TryGetRiverWaterEndpointDirection(pathPoint, heightmap, out string? direction))
+            {
+                return (true, direction, isStart);
+            }
+
+            return default;
+        }
+
+        (bool IsSeam, string? Direction, bool IsStart) GetTileEdgeSeam(int sampleIndex)
+        {
+            if (sampleIndex < 0 || sampleIndex >= sampleSeams.Count)
+            {
+                return default;
+            }
+
+            return sampleSeams[sampleIndex];
+        }
+
+        float GetRiverWaterSeamHalfWidth(
+            string? direction,
+            bool isStart,
+            float fallbackHalfWidth,
+            float sampleMetersPerSample)
+        {
+            if (riverInfo != null &&
+                TryGetRiverWaterEndpointFlow(riverInfo, direction, isStart, out double flow))
+            {
+                return Mathf.Max(
+                    0.05f,
+                    (float)MapRiverFlowToWaterWidthPixels(flow) *
+                    sampleMetersPerSample *
+                    Mathf.Max(0.05f, riverWaterWidthMultiplier));
+            }
+
+            return fallbackHalfWidth;
+        }
+
+        void ApplyRiverWaterSeamCenterCache()
+        {
+            if (terrain == null)
+            {
+                return;
+            }
+
+            Transform terrainTransform = terrain.transform;
+            for (int i = 0; i < centers.Count; i++)
+            {
+                if (!GetTileEdgeSeam(i).IsSeam ||
+                    !TryGetRiverWaterSeamKey(terrainTransform, centers[i], out string seamKey))
+                {
+                    continue;
+                }
+
+                if (riverWaterSeams.TryGetValue(seamKey, out RiverWaterSeamCrossSection seam))
+                {
+                    centers[i] = terrainTransform.InverseTransformPoint(seam.CenterWorld);
+                    continue;
+                }
+
+                riverWaterSeams[seamKey] = new RiverWaterSeamCrossSection(
+                    terrainTransform.TransformPoint(centers[i]));
+            }
+        }
+
+        void SmoothRiverWaterSeamAdjacentHeights()
+        {
+            if (centers.Count < 3)
+            {
+                return;
+            }
+
+            if (GetTileEdgeSeam(0).IsSeam)
+            {
+                SmoothRiverWaterSeamAdjacentHeightsFrom(0, 1);
+            }
+
+            int lastIndex = centers.Count - 1;
+            if (GetTileEdgeSeam(lastIndex).IsSeam)
+            {
+                SmoothRiverWaterSeamAdjacentHeightsFrom(lastIndex, -1);
+            }
+        }
+
+        void SmoothRiverWaterSeamAdjacentHeightsFrom(int seamIndex, int direction)
+        {
+            int maxOffset = Math.Min(2, centers.Count - 1);
+            for (int offset = 1; offset <= maxOffset; offset++)
+            {
+                int index = seamIndex + direction * offset;
+                if (index < 0 || index >= centers.Count)
+                {
+                    break;
+                }
+
+                float weight = offset == 1 ? 0.65f : 0.35f;
+                Vector3 center = centers[index];
+                center.y = Mathf.Lerp(center.y, centers[seamIndex].y, weight);
+                centers[index] = center;
+            }
+        }
+
+        (bool IsSeam, string? Direction, bool IsStart, float Weight) GetTileEdgeSeamInfluence(int sampleIndex)
+        {
+            var seam = GetTileEdgeSeam(sampleIndex);
+            if (seam.IsSeam)
+            {
+                return (true, seam.Direction, seam.IsStart, 1f);
+            }
+
+            if (sampleIndex <= 2)
+            {
+                var startSeam = GetTileEdgeSeam(0);
+                if (startSeam.IsSeam)
+                {
+                    float weight = sampleIndex == 1 ? 0.85f : 0.45f;
+                    return (true, startSeam.Direction, startSeam.IsStart, weight);
+                }
+            }
+
+            int lastIndex = sampleSeams.Count - 1;
+            int distanceFromEnd = lastIndex - sampleIndex;
+            if (distanceFromEnd >= 1 && distanceFromEnd <= 2)
+            {
+                var endSeam = GetTileEdgeSeam(lastIndex);
+                if (endSeam.IsSeam)
+                {
+                    float weight = distanceFromEnd == 1 ? 0.85f : 0.45f;
+                    return (true, endSeam.Direction, endSeam.IsStart, weight);
+                }
+            }
+
+            return default;
         }
     }
 
@@ -1785,6 +1970,159 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         return tangent.normalized;
+    }
+
+    private static bool TryGetRiverWaterSeamTangent(string? direction, bool isStartEndpoint, out Vector3 tangent)
+    {
+        tangent = direction switch
+        {
+            "N" => Vector3.forward,
+            "S" => Vector3.back,
+            "E" => Vector3.right,
+            "W" => Vector3.left,
+            _ => Vector3.zero
+        };
+
+        if (tangent.sqrMagnitude <= 0.0001f)
+        {
+            return false;
+        }
+
+        if (isStartEndpoint)
+        {
+            tangent = -tangent;
+        }
+
+        return true;
+    }
+
+    private static bool TryGetRiverWaterEndpointDirection(
+        RiverSurfacePoint point,
+        double[,] heightmap,
+        out string? direction)
+    {
+        const double epsilon = 1e-4;
+        double maxX = Math.Max(0, heightmap.GetLength(1) - 1);
+        double maxY = Math.Max(0, heightmap.GetLength(0) - 1);
+        if (point.X < -epsilon)
+        {
+            direction = "W";
+            return true;
+        }
+
+        if (point.X > maxX + epsilon)
+        {
+            direction = "E";
+            return true;
+        }
+
+        if (point.Y < -epsilon)
+        {
+            direction = "N";
+            return true;
+        }
+
+        if (point.Y > maxY + epsilon)
+        {
+            direction = "S";
+            return true;
+        }
+
+        direction = null;
+        return false;
+    }
+
+    private static bool TryGetRiverWaterEndpointFlow(
+        RiverInfo riverInfo,
+        string? direction,
+        bool isStartEndpoint,
+        out double flow)
+    {
+        flow = 0.0;
+        if (string.IsNullOrWhiteSpace(direction))
+        {
+            return false;
+        }
+
+        Dictionary<string, double> flows = isStartEndpoint
+            ? riverInfo.Inputs
+            : riverInfo.Outputs;
+        return flows.TryGetValue(direction, out flow) && flow > 0.0;
+    }
+
+    private static double MapRiverFlowToWaterWidthPixels(double flow)
+    {
+        double[] flowPoints = { 0, 0.05, 0.4, 1.0, 2, 4, 8 };
+        double[] widths = { 0, 1, 4, 7, 10, 14, 20 };
+
+        if (flow <= flowPoints[0])
+        {
+            return widths[0];
+        }
+
+        if (flow >= flowPoints[^1])
+        {
+            return widths[^1];
+        }
+
+        for (int i = 1; i < flowPoints.Length; i++)
+        {
+            if (flow <= flowPoints[i])
+            {
+                double t = (flow - flowPoints[i - 1]) / (flowPoints[i] - flowPoints[i - 1]);
+                return widths[i - 1] + t * (widths[i] - widths[i - 1]);
+            }
+        }
+
+        return widths[^1];
+    }
+
+    private static void ApplyRiverWaterSeamCache(
+        GStylizedTerrain? terrain,
+        Vector3 localCenter,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
+        ref Vector3 leftVertex,
+        ref Vector3 rightVertex)
+    {
+        Transform? terrainTransform = terrain != null ? terrain.transform : null;
+        if (terrainTransform == null ||
+            !TryGetRiverWaterSeamKey(terrainTransform, localCenter, out string seamKey))
+        {
+            return;
+        }
+
+        if (riverWaterSeams.TryGetValue(seamKey, out RiverWaterSeamCrossSection seam))
+        {
+            if (seam.HasVertices)
+            {
+                leftVertex = terrainTransform.InverseTransformPoint(seam.LeftWorld);
+                rightVertex = terrainTransform.InverseTransformPoint(seam.RightWorld);
+                return;
+            }
+
+            seam.SetVertices(
+                terrainTransform.TransformPoint(leftVertex),
+                terrainTransform.TransformPoint(rightVertex));
+        }
+        else
+        {
+            riverWaterSeams[seamKey] = new RiverWaterSeamCrossSection(
+                terrainTransform.TransformPoint(localCenter),
+                terrainTransform.TransformPoint(leftVertex),
+                terrainTransform.TransformPoint(rightVertex));
+        }
+    }
+
+    private static bool TryGetRiverWaterSeamKey(
+        Transform terrainTransform,
+        Vector3 localCenter,
+        out string key)
+    {
+        Vector3 worldCenter = terrainTransform.TransformPoint(localCenter);
+        string x = Math.Round(worldCenter.x, 3).ToString("F3", CultureInfo.InvariantCulture);
+        string z = Math.Round(worldCenter.z, 3).ToString("F3", CultureInfo.InvariantCulture);
+        key = x + ":" + z;
+        return true;
     }
 
     private static float HorizontalDistance(Vector3 a, Vector3 b)
@@ -3312,6 +3650,32 @@ public sealed class TileLoader : MonoBehaviour
         Reduced = 2,
         LowDetail = 3,
         Culled = 4,
+    }
+
+    private sealed class RiverWaterSeamCrossSection
+    {
+        public RiverWaterSeamCrossSection(Vector3 centerWorld)
+        {
+            CenterWorld = centerWorld;
+        }
+
+        public RiverWaterSeamCrossSection(Vector3 centerWorld, Vector3 leftWorld, Vector3 rightWorld)
+            : this(centerWorld)
+        {
+            SetVertices(leftWorld, rightWorld);
+        }
+
+        public void SetVertices(Vector3 leftWorld, Vector3 rightWorld)
+        {
+            LeftWorld = leftWorld;
+            RightWorld = rightWorld;
+            HasVertices = true;
+        }
+
+        public Vector3 CenterWorld { get; }
+        public Vector3 LeftWorld { get; private set; }
+        public Vector3 RightWorld { get; private set; }
+        public bool HasVertices { get; private set; }
     }
 
     private sealed class GeneratedConiferInstance
