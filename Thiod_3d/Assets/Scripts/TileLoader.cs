@@ -66,6 +66,10 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverDepthMultiplier = 0.18f;
     [SerializeField, Min(0f)] private float riverBankDepthMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverCenterDepthMultiplier = 0f;
+    [SerializeField] private bool riverUseGlobalProfile = true;
+    [SerializeField, Min(0f)] private float riverProfileMinDropMetersPerTile = 0.001f;
+    [SerializeField, Min(0f)] private float riverProfileMaxDropMetersPerTile = 6f;
+    [SerializeField, Min(0)] private int riverProfileSmoothingPasses = 2;
     [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingStrength = 0.35f;
     [SerializeField, Min(1)] private int riverCenterCarveSmoothingKernelRadius = 2;
     [SerializeField, Min(1)] private int riverCenterCarveSmoothingPasses = 1;
@@ -134,7 +138,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private string riverWaterMaterialAssetPath = DefaultRiverWaterMaterialAssetPath;
     [SerializeField, Min(0.05f)] private float riverWaterWidthMultiplier = 1.45f;
     [SerializeField, Min(0f)] private float riverWaterBedClearance = 0.18f;
-    [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.05f;
+    [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.001f;
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
     [SerializeField, Min(0.1f)] private float riverWaterUvWidthScale = 1f;
@@ -325,6 +329,10 @@ public sealed class TileLoader : MonoBehaviour
             ShoulderRadiusMultiplier = Math.Max(0.1f, riverCarveWidthMultiplier),
             ShoulderDepthMultiplier = Math.Max(0f, riverShoulderDepthMultiplier),
             ShoulderFalloffExponent = 1f,
+            UseGlobalRiverProfile = riverUseGlobalProfile,
+            RiverProfileMinDropMetersPerTile = Math.Max(0f, riverProfileMinDropMetersPerTile),
+            RiverProfileMaxDropMetersPerTile = Math.Max(riverProfileMinDropMetersPerTile, riverProfileMaxDropMetersPerTile),
+            RiverProfileSmoothingPasses = Math.Max(0, riverProfileSmoothingPasses),
             CorridorSmoothingStrength = Mathf.Clamp01(riverCorridorSmoothingStrength),
             CorridorSmoothingKernelRadius = Math.Max(0, riverCorridorSmoothingKernelRadius),
             CorridorSmoothingPasses = Math.Max(1, riverCorridorSmoothingPasses),
@@ -1397,6 +1405,7 @@ public sealed class TileLoader : MonoBehaviour
                 terrain,
                 request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
                 riverPaths,
+                request.Layers.RiverUsesGlobalProfile,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             if (riverMesh == null)
@@ -1460,6 +1469,7 @@ public sealed class TileLoader : MonoBehaviour
         GStylizedTerrain? terrain,
         double[,] heightmap,
         IReadOnlyList<RiverSurfacePath> riverPaths,
+        bool usesGlobalRiverProfile,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -1472,6 +1482,7 @@ public sealed class TileLoader : MonoBehaviour
                 terrain,
                 heightmap,
                 riverPaths[i],
+                usesGlobalRiverProfile,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             if (pathMesh == null)
@@ -1518,6 +1529,7 @@ public sealed class TileLoader : MonoBehaviour
         GStylizedTerrain? terrain,
         double[,] heightmap,
         RiverSurfacePath riverPath,
+        bool usesGlobalRiverProfile,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -1677,6 +1689,11 @@ public sealed class TileLoader : MonoBehaviour
                 centerBedHeights[i] = centers[i].y;
                 float surfaceY = centerBedHeights[i] + bedClearance;
                 centers[i] = new Vector3(centers[i].x, surfaceY, centers[i].z);
+            }
+
+            if (usesGlobalRiverProfile)
+            {
+                return;
             }
 
             float dropPerSegment = centers.Count > 1
