@@ -4,9 +4,11 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using UnityEngine;
+using Unity.Mathematics;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.Serialization;
+using UnityEngine.Splines;
 using WorldGen;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -71,14 +73,17 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0.05f)] private float riverCenterCarveWidthMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverProfileMinDropMetersPerTile = 0.001f;
     [SerializeField, Min(0f)] private float riverProfileMaxDropMetersPerTile = 6f;
-    [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingStrength = 0.35f;
-    [SerializeField, Min(1)] private int riverCenterCarveSmoothingKernelRadius = 2;
-    [SerializeField, Min(1)] private int riverCenterCarveSmoothingPasses = 1;
-    [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingRetainedDepthFraction = 0.35f;
-    [SerializeField, Range(0f, 1f)] private float riverBankSmoothingStrength = 0.35f;
-    [SerializeField, Min(1)] private int riverBankSmoothingKernelRadius = 3;
-    [SerializeField, Min(1)] private int riverBankSmoothingPasses = 1;
-    [SerializeField, Min(1)] private int riverBankSmoothingBandRadiusSamples = 4;
+    [FormerlySerializedAs("riverBankSmoothingStrength")]
+    [FormerlySerializedAs("riverCenterCarveSmoothingStrength")]
+    [SerializeField, Range(0f, 1f)] private float riverFinalSmoothingStrength = 1f;
+    [FormerlySerializedAs("riverBankSmoothingKernelRadius")]
+    [FormerlySerializedAs("riverCenterCarveSmoothingKernelRadius")]
+    [SerializeField, Min(1)] private int riverFinalSmoothingKernelRadius = 8;
+    [FormerlySerializedAs("riverBankSmoothingPasses")]
+    [FormerlySerializedAs("riverCenterCarveSmoothingPasses")]
+    [SerializeField, Min(1)] private int riverFinalSmoothingPasses = 6;
+    [FormerlySerializedAs("riverCenterCarveSmoothingRetainedDepthFraction")]
+    [SerializeField, Range(0f, 1f)] private float riverFinalSmoothingRetainedDepthFraction = 0.2f;
     [FormerlySerializedAs("riverCarveWidthMultiplier")]
     [SerializeField, Min(0.1f)] private float riverWidthMultiplier = 1.5f;
     [SerializeField, Min(0f)] private float riverShoulderDepthMultiplier = 2f;
@@ -139,7 +144,9 @@ public sealed class TileLoader : MonoBehaviour
 
     [Header("River Water Output")]
     [SerializeField] private bool createRiverWater = true;
+    [SerializeField] private bool createRiverDebugSplines = true;
     [SerializeField] private string generatedRiverWaterContainerName = "Rivers";
+    [SerializeField] private string generatedRiverSplineContainerName = "RiverDebugSpline";
     [SerializeField] private Material? riverWaterMaterial;
     [SerializeField] private string riverWaterMaterialAssetPath = DefaultRiverWaterMaterialAssetPath;
     [SerializeField, Min(0.05f)] private float riverWaterWidthMultiplier = 1.45f;
@@ -147,6 +154,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private float riverWaterMeshVerticalOffset = 0f;
     [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.001f;
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
+    [SerializeField, Min(1)] private int riverSplineSamplingStep = 2;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
     [SerializeField, Min(0.1f)] private float riverWaterUvWidthScale = 1f;
     [SerializeField, Min(0f)] private float riverWaterSpeedMultiplier = 1f;
@@ -350,14 +358,10 @@ public sealed class TileLoader : MonoBehaviour
             CorridorMinRadiusSamples = Math.Max(0, riverCorridorMinRadiusSamples),
             CorridorFillOuterFeatherStart = Mathf.Clamp01(riverCorridorFillOuterFeatherStart),
             CorridorFillOuterFeatherStrength = Mathf.Clamp01(riverCorridorFillOuterFeatherStrength),
-            BankSmoothingStrength = Mathf.Clamp01(riverBankSmoothingStrength),
-            BankSmoothingKernelRadius = Math.Max(1, riverBankSmoothingKernelRadius),
-            BankSmoothingPasses = Math.Max(1, riverBankSmoothingPasses),
-            BankSmoothingBandRadiusSamples = Math.Max(1, riverBankSmoothingBandRadiusSamples),
-            CenterSmoothingStrength = Mathf.Clamp01(riverCenterCarveSmoothingStrength),
-            CenterSmoothingKernelRadius = Math.Max(1, riverCenterCarveSmoothingKernelRadius),
-            CenterSmoothingPasses = Math.Max(1, riverCenterCarveSmoothingPasses),
-            CenterSmoothingRetainedDepthFraction = Mathf.Clamp01(riverCenterCarveSmoothingRetainedDepthFraction),
+            FinalSmoothingStrength = Mathf.Clamp01(riverFinalSmoothingStrength),
+            FinalSmoothingKernelRadius = Math.Max(1, riverFinalSmoothingKernelRadius),
+            FinalSmoothingPasses = Math.Max(1, riverFinalSmoothingPasses),
+            FinalSmoothingRetainedDepthFraction = Mathf.Clamp01(riverFinalSmoothingRetainedDepthFraction),
         };
     }
 
@@ -507,6 +511,7 @@ public sealed class TileLoader : MonoBehaviour
         {
             RebuildTerrainSeams(createdTerrains);
             ApplyTerrainShading(createdTerrains);
+            PopulateRiverDebugSplines(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
             PopulateRiverWater(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
             PopulateVegetation(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
             if (Application.isPlaying)
@@ -1448,6 +1453,46 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
+    private void PopulateRiverDebugSplines(
+        IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
+        IReadOnlyList<GStylizedTerrain> terrains,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        if (!createRiverDebugSplines)
+        {
+            return;
+        }
+
+        int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
+        for (int i = 0; i < terrainCount; i++)
+        {
+            GeneratedTerrainRequest request = terrainRequests[i];
+            IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
+            if (riverPaths.Count == 0)
+            {
+                continue;
+            }
+
+            GStylizedTerrain terrain = terrains[i];
+            if (terrain == null)
+            {
+                continue;
+            }
+
+            Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
+            SplineContainer splineContainer = CreateRiverDebugSplineContainer(riverContainer);
+            IReadOnlyList<Spline> splines = BuildRiverDebugSplines(
+                terrain,
+                request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
+                riverPaths,
+                normalizationMinHeight,
+                normalizationMaxHeight);
+            splineContainer.Splines = splines;
+            splineContainer.gameObject.SetActive(splines.Count > 0);
+        }
+    }
+
     private void ApplyRiverWaterMaterialOverrides(MeshRenderer meshRenderer, Material waterMaterial)
     {
         float speedMultiplier = Mathf.Max(0f, riverWaterSpeedMultiplier);
@@ -1565,23 +1610,26 @@ public sealed class TileLoader : MonoBehaviour
         var centers = new List<Vector3>();
         var sampledPoints = new List<RiverSurfacePoint>();
         var sampleSeams = new List<(bool IsSeam, string? Direction, bool IsStart)>();
-        int stride = Math.Max(1, riverWaterSampleStride);
-        for (int i = 0; i < pathPoints.Count; i += stride)
-        {
-            AddRiverWaterSample(i, force: false);
-        }
-
-        AddRiverWaterSample(pathPoints.Count - 1, force: true);
-
-        if (centers.Count < 2)
-        {
-            return null;
-        }
-
         int heightResolution = heightmap.GetLength(0);
         int widthResolution = heightmap.GetLength(1);
         float sampleSpacingX = widthResolution > 1 ? terrainWidth / (widthResolution - 1) : terrainWidth;
         float sampleSpacingZ = heightResolution > 1 ? terrainLength / (heightResolution - 1) : terrainLength;
+        if (!TryBuildRiverWaterSplineSamples(
+                terrain,
+                heightmap,
+                riverPath,
+                pathPoints,
+                sampleSpacingX,
+                sampleSpacingZ,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                centers,
+                sampledPoints,
+                sampleSeams))
+        {
+            return null;
+        }
+
         float metersPerSample = Mathf.Max(0.001f, (sampleSpacingX + sampleSpacingZ) * 0.5f);
         float baseHalfWidth = Mathf.Max(
             0.05f,
@@ -1690,46 +1738,11 @@ public sealed class TileLoader : MonoBehaviour
         mesh.RecalculateTangents();
         return mesh;
 
-        void AddRiverWaterSample(int index, bool force)
-        {
-            RiverSurfacePoint pathPoint = pathPoints[index];
-            var seam = GetEndpointSeamForPathIndex(index, pathPoint);
-            Vector3 localPoint = GetTerrainLocalPoint(
-                null,
-                heightmap,
-                pathPoint.X,
-                pathPoint.Y,
-                normalizationMinHeight,
-                normalizationMaxHeight,
-                0f);
-
-            float minSegmentLength = Mathf.Max(0f, riverWaterMinSegmentLength);
-            if (centers.Count > 0 && minSegmentLength > 0f)
-            {
-                float minSegmentSqr = minSegmentLength * minSegmentLength;
-                if ((localPoint - centers[^1]).sqrMagnitude < minSegmentSqr)
-                {
-                    if (force)
-                    {
-                        centers[^1] = localPoint;
-                        sampledPoints[^1] = pathPoint;
-                        sampleSeams[^1] = seam;
-                    }
-
-                    return;
-                }
-            }
-
-            centers.Add(localPoint);
-            sampledPoints.Add(pathPoint);
-            sampleSeams.Add(seam);
-        }
-
         void ApplyRiverWaterSurfaceHeights()
         {
             float bedClearance = usesRiverProfile ? 0f : Mathf.Max(0f, riverWaterBedClearance);
             float meshVerticalOffset = riverWaterMeshVerticalOffset;
-            float profileInset = usesRiverProfile ? 0.03f : 0f;
+            float profileInset = usesRiverProfile ? 0.01f : 0f;
             var centerBedHeights = new float[centers.Count];
 
             for (int i = 0; i < centers.Count; i++)
@@ -1760,24 +1773,6 @@ public sealed class TileLoader : MonoBehaviour
                     centers[i] = new Vector3(centers[i].x, maxDownstreamSurfaceY, centers[i].z);
                 }
             }
-        }
-
-        (bool IsSeam, string? Direction, bool IsStart) GetEndpointSeamForPathIndex(
-            int index,
-            RiverSurfacePoint pathPoint)
-        {
-            bool isStart = index == 0;
-            if (!isStart && index != pathPoints.Count - 1)
-            {
-                return default;
-            }
-
-            if (TryGetRiverWaterEndpointDirection(pathPoint, heightmap, out string? direction))
-            {
-                return (true, direction, isStart);
-            }
-
-            return default;
         }
 
         (bool IsSeam, string? Direction, bool IsStart) GetTileEdgeSeam(int sampleIndex)
@@ -1927,6 +1922,255 @@ public sealed class TileLoader : MonoBehaviour
         return container.transform;
     }
 
+    private SplineContainer CreateRiverDebugSplineContainer(Transform riverContainer)
+    {
+        string containerName = string.IsNullOrWhiteSpace(generatedRiverSplineContainerName)
+            ? "RiverDebugSpline"
+            : generatedRiverSplineContainerName.Trim();
+        Transform existing = riverContainer.Find(containerName);
+        GameObject containerObject;
+        if (existing != null)
+        {
+            containerObject = existing.gameObject;
+        }
+        else
+        {
+            containerObject = new GameObject(containerName);
+            containerObject.transform.SetParent(riverContainer, false);
+            containerObject.transform.localPosition = Vector3.zero;
+            containerObject.transform.localRotation = Quaternion.identity;
+            containerObject.transform.localScale = Vector3.one;
+        }
+
+        SplineContainer splineContainer = containerObject.GetComponent<SplineContainer>();
+        if (splineContainer == null)
+        {
+            splineContainer = containerObject.AddComponent<SplineContainer>();
+        }
+
+        return splineContainer;
+    }
+
+    private IReadOnlyList<Spline> BuildRiverDebugSplines(
+        GStylizedTerrain terrain,
+        double[,] heightmap,
+        IReadOnlyList<RiverSurfacePath> riverPaths,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        var splines = new List<Spline>(riverPaths.Count);
+        int heightResolution = heightmap.GetLength(0);
+        int widthResolution = heightmap.GetLength(1);
+        float sampleSpacingX = widthResolution > 1 ? terrainWidth / (widthResolution - 1f) : terrainWidth;
+        float sampleSpacingZ = heightResolution > 1 ? terrainLength / (heightResolution - 1f) : terrainLength;
+
+        for (int i = 0; i < riverPaths.Count; i++)
+        {
+            Spline? spline = BuildRiverDebugSpline(
+                terrain,
+                heightmap,
+                riverPaths[i],
+                sampleSpacingX,
+                sampleSpacingZ,
+                normalizationMinHeight,
+                normalizationMaxHeight);
+            if (spline != null)
+            {
+                splines.Add(spline);
+            }
+        }
+
+        return splines;
+    }
+
+    private Spline? BuildRiverDebugSpline(
+        GStylizedTerrain terrain,
+        double[,] heightmap,
+        RiverSurfacePath riverPath,
+        float sampleSpacingX,
+        float sampleSpacingZ,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        IReadOnlyList<RiverSurfacePoint> pathPoints = riverPath.Points;
+        if (pathPoints.Count < 2)
+        {
+            return null;
+        }
+
+        var spline = new Spline();
+        float terrainSampleSpacingX = Mathf.Max(0.05f, sampleSpacingX);
+        float terrainSampleSpacingZ = Mathf.Max(0.05f, sampleSpacingZ);
+
+        for (int i = 0; i < pathPoints.Count; i++)
+        {
+            RiverSurfacePoint pathPoint = pathPoints[i];
+            Vector3 localPoint = GetTerrainLocalPoint(
+                terrain,
+                heightmap,
+                pathPoint.X,
+                pathPoint.Y,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                0f);
+
+            if (TrySampleGeneratedTerrainLocalMinimumPoint3x3(
+                    terrain,
+                    localPoint.x,
+                    localPoint.z,
+                    terrainSampleSpacingX,
+                    terrainSampleSpacingZ,
+                    out float sampledMinY))
+            {
+                localPoint.y = sampledMinY;
+            }
+
+            spline.Add(new float3(localPoint.x, localPoint.y, localPoint.z), TangentMode.Linear);
+        }
+
+        return spline.Count >= 2 ? spline : null;
+    }
+
+    private Spline? BuildRiverTerrainConformedSpline(
+        GStylizedTerrain? terrain,
+        double[,] heightmap,
+        RiverSurfacePath riverPath,
+        float sampleSpacingX,
+        float sampleSpacingZ,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        int knotStep,
+        TangentMode tangentMode)
+    {
+        IReadOnlyList<RiverSurfacePoint> pathPoints = riverPath.Points;
+        if (pathPoints.Count < 2)
+        {
+            return null;
+        }
+
+        var spline = new Spline();
+        int effectiveStep = Math.Max(1, knotStep);
+        float terrainSampleSpacingX = Mathf.Max(0.05f, sampleSpacingX);
+        float terrainSampleSpacingZ = Mathf.Max(0.05f, sampleSpacingZ);
+
+        for (int i = 0; i < pathPoints.Count; i += effectiveStep)
+        {
+            AddRiverSplineKnot(i);
+        }
+
+        if ((pathPoints.Count - 1) % effectiveStep != 0)
+        {
+            AddRiverSplineKnot(pathPoints.Count - 1);
+        }
+
+        return spline.Count >= 2 ? spline : null;
+
+        void AddRiverSplineKnot(int index)
+        {
+            RiverSurfacePoint pathPoint = pathPoints[index];
+            Vector3 localPoint = GetTerrainLocalPoint(
+                terrain,
+                heightmap,
+                pathPoint.X,
+                pathPoint.Y,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                0f);
+
+            if (terrain != null &&
+                TrySampleGeneratedTerrainLocalMinimumPoint3x3(
+                    terrain,
+                    localPoint.x,
+                    localPoint.z,
+                    terrainSampleSpacingX,
+                    terrainSampleSpacingZ,
+                    out float sampledMinY))
+            {
+                localPoint.y = sampledMinY;
+            }
+
+            spline.Add(new float3(localPoint.x, localPoint.y, localPoint.z), tangentMode);
+        }
+    }
+
+    private bool TryBuildRiverWaterSplineSamples(
+        GStylizedTerrain? terrain,
+        double[,] heightmap,
+        RiverSurfacePath riverPath,
+        IReadOnlyList<RiverSurfacePoint> pathPoints,
+        float sampleSpacingX,
+        float sampleSpacingZ,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        List<Vector3> centers,
+        List<RiverSurfacePoint> sampledPoints,
+        List<(bool IsSeam, string? Direction, bool IsStart)> sampleSeams)
+    {
+        int splineStep = Math.Max(1, riverSplineSamplingStep);
+        Spline? spline = BuildRiverTerrainConformedSpline(
+            terrain,
+            heightmap,
+            riverPath,
+            sampleSpacingX,
+            sampleSpacingZ,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            splineStep,
+            TangentMode.AutoSmooth);
+
+        if (spline == null)
+        {
+            return false;
+        }
+
+        var sourceSampleIndices = new List<int>();
+        int meshStride = Math.Max(1, riverWaterSampleStride);
+        for (int i = 0; i < pathPoints.Count; i += meshStride)
+        {
+            sourceSampleIndices.Add(i);
+        }
+
+        if (sourceSampleIndices.Count == 0 || sourceSampleIndices[^1] != pathPoints.Count - 1)
+        {
+            sourceSampleIndices.Add(pathPoints.Count - 1);
+        }
+
+        float minSegmentLength = Mathf.Max(0f, riverWaterMinSegmentLength);
+        float minSegmentSqr = minSegmentLength * minSegmentLength;
+        float denominator = Math.Max(1, pathPoints.Count - 1);
+
+        for (int sampleIndex = 0; sampleIndex < sourceSampleIndices.Count; sampleIndex++)
+        {
+            int sourceIndex = sourceSampleIndices[sampleIndex];
+            RiverSurfacePoint pathPoint = pathPoints[sourceIndex];
+            float t = sourceIndex / denominator;
+            float3 splinePosition = spline.EvaluatePosition(t);
+            Vector3 localPoint = new(splinePosition.x, splinePosition.y, splinePosition.z);
+            var seam = GetRiverWaterEndpointSeamForPathIndex(pathPoints, heightmap, sourceIndex, pathPoint);
+
+            if (centers.Count > 0 && minSegmentLength > 0f)
+            {
+                if ((localPoint - centers[^1]).sqrMagnitude < minSegmentSqr)
+                {
+                    if (sampleIndex == sourceSampleIndices.Count - 1)
+                    {
+                        centers[^1] = localPoint;
+                        sampledPoints[^1] = pathPoint;
+                        sampleSeams[^1] = seam;
+                    }
+
+                    continue;
+                }
+            }
+
+            centers.Add(localPoint);
+            sampledPoints.Add(pathPoint);
+            sampleSeams.Add(seam);
+        }
+
+        return centers.Count >= 2;
+    }
+
     private Material? ResolveRiverWaterMaterial()
     {
         if (riverWaterMaterial != null)
@@ -2000,6 +2244,26 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         return true;
+    }
+
+    private static (bool IsSeam, string? Direction, bool IsStart) GetRiverWaterEndpointSeamForPathIndex(
+        IReadOnlyList<RiverSurfacePoint> pathPoints,
+        double[,] heightmap,
+        int index,
+        RiverSurfacePoint pathPoint)
+    {
+        bool isStart = index == 0;
+        if (!isStart && index != pathPoints.Count - 1)
+        {
+            return default;
+        }
+
+        if (TryGetRiverWaterEndpointDirection(pathPoint, heightmap, out string? direction))
+        {
+            return (true, direction, isStart);
+        }
+
+        return default;
     }
 
     private static bool TryGetRiverWaterEndpointDirection(
@@ -2657,6 +2921,48 @@ public sealed class TileLoader : MonoBehaviour
 
         Vector3 worldPoint = terrainHit.point + terrain.transform.up * verticalOffset;
         localPoint = terrain.transform.InverseTransformPoint(worldPoint);
+        return true;
+    }
+
+    private bool TrySampleGeneratedTerrainLocalMinimumPoint3x3(
+        GStylizedTerrain? terrain,
+        float localX,
+        float localZ,
+        float sampleSpacingX,
+        float sampleSpacingZ,
+        out float minimumY)
+    {
+        minimumY = 0f;
+        if (terrain == null || !terrain.isActiveAndEnabled || terrain.TerrainData == null)
+        {
+            return false;
+        }
+
+        bool found = false;
+        float minY = float.PositiveInfinity;
+
+        for (int offsetZ = -1; offsetZ <= 1; offsetZ++)
+        {
+            for (int offsetX = -1; offsetX <= 1; offsetX++)
+            {
+                float sampleX = Mathf.Clamp(localX + offsetX * sampleSpacingX, 0f, terrainWidth);
+                float sampleZ = Mathf.Clamp(localZ + offsetZ * sampleSpacingZ, 0f, terrainLength);
+                if (!TrySampleGeneratedTerrainLocalPoint(terrain, sampleX, sampleZ, 0f, out Vector3 samplePoint))
+                {
+                    continue;
+                }
+
+                minY = Mathf.Min(minY, samplePoint.y);
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+
+        minimumY = minY;
         return true;
     }
 
