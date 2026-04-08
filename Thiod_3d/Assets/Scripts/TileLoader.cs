@@ -155,6 +155,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverWaterMinimumDownstreamDrop = 0.001f;
     [SerializeField, Min(1)] private int riverWaterSampleStride = 1;
     [SerializeField, Min(1)] private int riverSplineSamplingStep = 2;
+    [SerializeField, Min(1)] private int riverSplineAvgElements = 1;
     [SerializeField, Min(0.1f)] private float riverWaterUvLengthScale = 12f;
     [SerializeField, Min(0.1f)] private float riverWaterUvWidthScale = 1f;
     [SerializeField, Min(0f)] private float riverWaterSpeedMultiplier = 1f;
@@ -1630,6 +1631,7 @@ public sealed class TileLoader : MonoBehaviour
             return null;
         }
 
+        ApplyRiverSplineAveraging();
         float metersPerSample = Mathf.Max(0.001f, (sampleSpacingX + sampleSpacingZ) * 0.5f);
         float baseHalfWidth = Mathf.Max(
             0.05f,
@@ -1737,6 +1739,40 @@ public sealed class TileLoader : MonoBehaviour
         mesh.RecalculateNormals();
         mesh.RecalculateTangents();
         return mesh;
+
+        void ApplyRiverSplineAveraging()
+        {
+            int averagingElements = Math.Max(1, riverSplineAvgElements);
+            if (averagingElements <= 1 || centers.Count <= 1)
+            {
+                return;
+            }
+
+            int halfBefore = (averagingElements - 1) / 2;
+            int halfAfter = averagingElements / 2;
+            var averagedY = new float[centers.Count];
+
+            for (int i = 0; i < centers.Count; i++)
+            {
+                int start = Math.Max(0, i - halfBefore);
+                int end = Math.Min(centers.Count - 1, i + halfAfter);
+                float sum = 0f;
+                int count = 0;
+                for (int sampleIndex = start; sampleIndex <= end; sampleIndex++)
+                {
+                    sum += centers[sampleIndex].y;
+                    count++;
+                }
+
+                averagedY[i] = count > 0 ? sum / count : centers[i].y;
+            }
+
+            for (int i = 0; i < centers.Count; i++)
+            {
+                Vector3 center = centers[i];
+                centers[i] = new Vector3(center.x, averagedY[i], center.z);
+            }
+        }
 
         void ApplyRiverWaterSurfaceHeights()
         {
