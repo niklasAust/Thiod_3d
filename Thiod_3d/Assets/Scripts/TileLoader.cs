@@ -2938,31 +2938,17 @@ public sealed class TileLoader : MonoBehaviour
             return false;
         }
 
-        bool found = false;
-        float minY = float.PositiveInfinity;
-
-        for (int offsetZ = -1; offsetZ <= 1; offsetZ++)
-        {
-            for (int offsetX = -1; offsetX <= 1; offsetX++)
-            {
-                float sampleX = Mathf.Clamp(localX + offsetX * sampleSpacingX, 0f, terrainWidth);
-                float sampleZ = Mathf.Clamp(localZ + offsetZ * sampleSpacingZ, 0f, terrainLength);
-                if (!TrySampleGeneratedTerrainLocalPoint(terrain, sampleX, sampleZ, 0f, out Vector3 samplePoint))
-                {
-                    continue;
-                }
-
-                minY = Mathf.Min(minY, samplePoint.y);
-                found = true;
-            }
-        }
-
-        if (!found)
+        if (!TrySampleGeneratedTerrainLocalPoint(
+                terrain,
+                Mathf.Clamp(localX, 0f, terrainWidth),
+                Mathf.Clamp(localZ, 0f, terrainLength),
+                0f,
+                out Vector3 samplePoint))
         {
             return false;
         }
 
-        minimumY = minY;
+        minimumY = samplePoint.y;
         return true;
     }
 
