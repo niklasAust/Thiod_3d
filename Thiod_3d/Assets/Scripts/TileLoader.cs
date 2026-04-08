@@ -68,17 +68,19 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverDepthMultiplier = 0.18f;
     [SerializeField, Min(0f)] private float riverBankDepthMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverCenterDepthMultiplier = 0f;
-    [SerializeField] private bool riverUseGlobalProfile = true;
+    [SerializeField, Min(0.05f)] private float riverCenterCarveWidthMultiplier = 1f;
     [SerializeField, Min(0f)] private float riverProfileMinDropMetersPerTile = 0.001f;
     [SerializeField, Min(0f)] private float riverProfileMaxDropMetersPerTile = 6f;
-    [SerializeField, Min(0f)] private float riverProfileMaxFillMeters = 80f;
-    [SerializeField, Min(0f)] private float riverProfileMaxCutMeters = 40f;
-    [SerializeField, Min(0)] private int riverProfileSmoothingPasses = 2;
     [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingStrength = 0.35f;
     [SerializeField, Min(1)] private int riverCenterCarveSmoothingKernelRadius = 2;
     [SerializeField, Min(1)] private int riverCenterCarveSmoothingPasses = 1;
     [SerializeField, Range(0f, 1f)] private float riverCenterCarveSmoothingRetainedDepthFraction = 0.35f;
-    [SerializeField, Min(0.1f)] private float riverCarveWidthMultiplier = 1.5f;
+    [SerializeField, Range(0f, 1f)] private float riverBankSmoothingStrength = 0.35f;
+    [SerializeField, Min(1)] private int riverBankSmoothingKernelRadius = 3;
+    [SerializeField, Min(1)] private int riverBankSmoothingPasses = 1;
+    [SerializeField, Min(1)] private int riverBankSmoothingBandRadiusSamples = 4;
+    [FormerlySerializedAs("riverCarveWidthMultiplier")]
+    [SerializeField, Min(0.1f)] private float riverWidthMultiplier = 1.5f;
     [SerializeField, Min(0f)] private float riverShoulderDepthMultiplier = 2f;
 
     [Header("Terrain Output")]
@@ -330,16 +332,15 @@ public sealed class TileLoader : MonoBehaviour
             DepthMultiplier = Math.Max(0f, riverDepthMultiplier),
             BankDepthMultiplier = Math.Max(0f, riverBankDepthMultiplier),
             CenterDepthMultiplier = Math.Max(0f, riverCenterDepthMultiplier),
+            CenterCarveWidthMultiplier = Math.Max(0.05f, riverCenterCarveWidthMultiplier),
+            WaterWidthMultiplier = Math.Max(0.05f, riverWaterWidthMultiplier),
             ChannelProfileExponent = 1f,
-            ShoulderRadiusMultiplier = Math.Max(0.1f, riverCarveWidthMultiplier),
+            RiverWidthMultiplier = Math.Max(0.1f, riverWidthMultiplier),
+            ShoulderRadiusMultiplier = Math.Max(0.1f, riverWidthMultiplier),
             ShoulderDepthMultiplier = Math.Max(0f, riverShoulderDepthMultiplier),
             ShoulderFalloffExponent = 1f,
-            UseGlobalRiverProfile = riverUseGlobalProfile,
             RiverProfileMinDropMetersPerTile = Math.Max(0f, riverProfileMinDropMetersPerTile),
             RiverProfileMaxDropMetersPerTile = Math.Max(riverProfileMinDropMetersPerTile, riverProfileMaxDropMetersPerTile),
-            RiverProfileMaxFillMeters = Math.Max(0f, riverProfileMaxFillMeters),
-            RiverProfileMaxCutMeters = Math.Max(0f, riverProfileMaxCutMeters),
-            RiverProfileSmoothingPasses = Math.Max(0, riverProfileSmoothingPasses),
             CorridorSmoothingStrength = Mathf.Clamp01(riverCorridorSmoothingStrength),
             CorridorSmoothingKernelRadius = Math.Max(0, riverCorridorSmoothingKernelRadius),
             CorridorSmoothingPasses = Math.Max(1, riverCorridorSmoothingPasses),
@@ -349,6 +350,10 @@ public sealed class TileLoader : MonoBehaviour
             CorridorMinRadiusSamples = Math.Max(0, riverCorridorMinRadiusSamples),
             CorridorFillOuterFeatherStart = Mathf.Clamp01(riverCorridorFillOuterFeatherStart),
             CorridorFillOuterFeatherStrength = Mathf.Clamp01(riverCorridorFillOuterFeatherStrength),
+            BankSmoothingStrength = Mathf.Clamp01(riverBankSmoothingStrength),
+            BankSmoothingKernelRadius = Math.Max(1, riverBankSmoothingKernelRadius),
+            BankSmoothingPasses = Math.Max(1, riverBankSmoothingPasses),
+            BankSmoothingBandRadiusSamples = Math.Max(1, riverBankSmoothingBandRadiusSamples),
             CenterSmoothingStrength = Mathf.Clamp01(riverCenterCarveSmoothingStrength),
             CenterSmoothingKernelRadius = Math.Max(1, riverCenterCarveSmoothingKernelRadius),
             CenterSmoothingPasses = Math.Max(1, riverCenterCarveSmoothingPasses),
@@ -1417,7 +1422,7 @@ public sealed class TileLoader : MonoBehaviour
                 riverPaths,
                 request.Layers.RiverInfo,
                 riverWaterSeams,
-                request.Layers.RiverUsesGlobalProfile,
+            request.Layers.RiverUsesProfile,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             if (riverMesh == null)
@@ -1483,7 +1488,7 @@ public sealed class TileLoader : MonoBehaviour
         IReadOnlyList<RiverSurfacePath> riverPaths,
         RiverInfo? riverInfo,
         IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
-        bool usesGlobalRiverProfile,
+        bool usesRiverProfile,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -1498,7 +1503,7 @@ public sealed class TileLoader : MonoBehaviour
                 riverPaths[i],
                 riverInfo,
                 riverWaterSeams,
-                usesGlobalRiverProfile,
+                usesRiverProfile,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             if (pathMesh == null)
@@ -1547,7 +1552,7 @@ public sealed class TileLoader : MonoBehaviour
         RiverSurfacePath riverPath,
         RiverInfo? riverInfo,
         IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
-        bool usesGlobalRiverProfile,
+        bool usesRiverProfile,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -1722,18 +1727,19 @@ public sealed class TileLoader : MonoBehaviour
 
         void ApplyRiverWaterSurfaceHeights()
         {
-            float bedClearance = Mathf.Max(0f, riverWaterBedClearance);
+            float bedClearance = usesRiverProfile ? 0f : Mathf.Max(0f, riverWaterBedClearance);
             float meshVerticalOffset = riverWaterMeshVerticalOffset;
+            float profileInset = usesRiverProfile ? 0.03f : 0f;
             var centerBedHeights = new float[centers.Count];
 
             for (int i = 0; i < centers.Count; i++)
             {
                 centerBedHeights[i] = centers[i].y;
-                float surfaceY = centerBedHeights[i] + bedClearance + meshVerticalOffset;
+                float surfaceY = centerBedHeights[i] + bedClearance + meshVerticalOffset - profileInset;
                 centers[i] = new Vector3(centers[i].x, surfaceY, centers[i].z);
             }
 
-            if (usesGlobalRiverProfile)
+            if (usesRiverProfile)
             {
                 return;
             }
