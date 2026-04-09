@@ -1,10 +1,13 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
 using Unity.Mathematics;
+using Unity.Profiling;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.Serialization;
@@ -136,6 +139,9 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private bool placeTreeObjects = true;
     [FormerlySerializedAs("placeGrassClusters")]
     [SerializeField] private bool placeSurfaceObjects = true;
+    [SerializeField] private VegetationLoadMode vegetationLoadMode = VegetationLoadMode.HybridInteractive;
+    [SerializeField, Min(0f)] private float vegetationInteractionRadiusMeters = 80f;
+    [SerializeField, Min(0f)] private float vegetationInteractionHysteresisMeters = 16f;
     [SerializeField] private string generatedVegetationContainerName = "Vegetation";
     [FormerlySerializedAs("coniferVerticalOffset")]
     [SerializeField] private float treeObjectVerticalOffset = 0f;
@@ -179,6 +185,7 @@ public sealed class TileLoader : MonoBehaviour
 
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
+    [SerializeField] private bool logGenerationPhaseTimings = true;
     [SerializeField, HideInInspector] private List<GeneratedTerrainShadingMetadata> generatedTerrainShadingMetadata = new();
 
     private bool hasLoadedInCurrentEnableCycle;
@@ -191,6 +198,21 @@ public sealed class TileLoader : MonoBehaviour
     private bool pendingEditorSeamRebuild;
 #endif
     private readonly List<GeneratedConiferInstance> generatedConiferInstances = new();
+    private readonly Dictionary<string, GameObject?> prefabCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TileLoaderInstancedVegetationPrototype?> vegetationPrototypeCache = new(StringComparer.OrdinalIgnoreCase);
+    private GeneratedTerrainBatchCacheEntry? cachedTerrainBatch;
+    private int activeGenerationPipelineId;
+    private Material? cachedRiverWaterMaterial;
+    private string? cachedRiverWaterMaterialPath;
+    private static readonly Dictionary<string, CachedLoadedWorldData> LoadedWorldDataCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ProfilerMarker BatchWorldgenMarker = new("TileLoader.BatchWorldgen");
+    private static readonly ProfilerMarker TerrainCreationMarker = new("TileLoader.TerrainCreation");
+    private static readonly ProfilerMarker TerrainSeamsMarker = new("TileLoader.TerrainSeams");
+    private static readonly ProfilerMarker TerrainShadingMarker = new("TileLoader.TerrainShading");
+    private static readonly ProfilerMarker RiverWaterMarker = new("TileLoader.RiverWater");
+    private static readonly ProfilerMarker RiverSplineMarker = new("TileLoader.RiverDebugSplines");
+    private static readonly ProfilerMarker VegetationPlacementMarker = new("TileLoader.VegetationPlacement");
+    private static readonly ProfilerMarker VegetationRenderMarker = new("TileLoader.VegetationRender");
 
     private void OnEnable()
     {
@@ -218,10 +240,17 @@ public sealed class TileLoader : MonoBehaviour
 
         if (Application.isPlaying && HasGeneratedTerrains())
         {
-            RegisterExistingGeneratedTreeObjects();
-            AlignExistingGeneratedSurfaceObjects();
+            if (UsesLegacyVegetationObjects())
+            {
+                RegisterExistingGeneratedTreeObjects();
+                AlignExistingGeneratedSurfaceObjects();
+            }
+
             ScheduleRuntimeTerrainSeamRebuild();
-            UpdateConiferOptimization(forceFullIfNoTarget: true);
+            if (UsesLegacyVegetationObjects())
+            {
+                UpdateConiferOptimization(forceFullIfNoTarget: true);
+            }
         }
     }
 
@@ -238,7 +267,7 @@ public sealed class TileLoader : MonoBehaviour
             RebuildExistingGeneratedTerrainSeams();
         }
 
-        if (!optimizeConifersByDistance)
+        if (!UsesLegacyVegetationObjects() || !optimizeConifersByDistance)
         {
             if (coniferOptimizationWasActive)
             {
@@ -257,6 +286,11 @@ public sealed class TileLoader : MonoBehaviour
 
         nextConiferOptimizationTime = Time.unscaledTime + Mathf.Max(0.05f, coniferOptimizationInterval);
         UpdateConiferOptimization();
+    }
+
+    private bool UsesLegacyVegetationObjects()
+    {
+        return vegetationLoadMode == VegetationLoadMode.LegacyGameObjects;
     }
 
     private void OnValidate()
@@ -318,8 +352,7 @@ public sealed class TileLoader : MonoBehaviour
                 return;
             }
 
-            Dictionary<string, object> rawWorldData = WorldGenerator.LoadWorldDataBinary(filePath);
-            LoadedWorldData loadedWorldData = ReconstructWorldData(rawWorldData);
+            LoadedWorldData loadedWorldData = GetOrLoadCachedWorldData(filePath);
             GenerationSettings settings = ResolveGenerationSettings(loadedWorldData.Metadata);
 
             var tileGenerator = new TileGenerator(loadedWorldData.WorldData, loadedWorldData.Seed);
@@ -445,81 +478,337 @@ public sealed class TileLoader : MonoBehaviour
 #if GRIFFIN
     private void CreateOrUpdateTerrains(TileGenerator tileGenerator, LoadedWorldData loadedWorldData, GenerationSettings settings)
     {
+        activeGenerationPipelineId++;
+        int pipelineId = activeGenerationPipelineId;
         ClearGeneratedTerrains();
+        GeneratedTerrainBatchState batchState = MeasureGenerationPhase(
+            BatchWorldgenMarker,
+            load3x3Neighborhood ? "3x3 batch worldgen" : "tile worldgen",
+            () => BuildGeneratedTerrainBatchState(tileGenerator, loadedWorldData, settings, pipelineId));
 
-        int minOffset = load3x3Neighborhood ? -1 : 0;
-        int maxOffset = load3x3Neighborhood ? 1 : 0;
-        var terrainsToCreate = new List<GeneratedTerrainRequest>();
-        var createdTerrains = new List<GStylizedTerrain>();
+        if (batchState.Requests.Count == 0)
+        {
+            return;
+        }
+
+        MeasureGenerationPhase(
+            TerrainCreationMarker,
+            "terrain creation",
+            () =>
+            {
+                int terrainGroupId = GetGeneratedTerrainGroupId();
+                for (int i = 0; i < batchState.Requests.Count; i++)
+                {
+                    GeneratedTerrainRequest request = batchState.Requests[i];
+                    GStylizedTerrain terrain = CreateTerrain(
+                        request.Layers,
+                        request.TerrainObjectName,
+                        request.LocalPosition,
+                        request.UnityTileX,
+                        request.UnityTileY,
+                        batchState.NormalizationMinHeight,
+                        batchState.NormalizationMaxHeight,
+                        request.LocalMinHeight,
+                        request.LocalMaxHeight,
+                        request.TileHilliness,
+                        terrainGroupId);
+                    batchState.CreatedTerrains.Add(terrain);
+                }
+            });
+
+        if (batchState.CreatedTerrains.Count == 0)
+        {
+            return;
+        }
+
+        MeasureGenerationPhase(
+            TerrainSeamsMarker,
+            "terrain seams",
+            () => RebuildTerrainSeams(batchState.CreatedTerrains));
+
+        MeasureGenerationPhase(
+            TerrainShadingMarker,
+            "terrain shading",
+            () => ApplyTerrainShading(batchState.CreatedTerrains));
+
+        ScheduleDeferredGenerationPhases(batchState);
+    }
+
+    private LoadedWorldData GetOrLoadCachedWorldData(string filePath)
+    {
+        string normalizedPath = Path.GetFullPath(filePath);
+        DateTime lastWriteUtc = File.GetLastWriteTimeUtc(normalizedPath);
+        if (LoadedWorldDataCache.TryGetValue(normalizedPath, out CachedLoadedWorldData cached) &&
+            cached.LastWriteUtc == lastWriteUtc)
+        {
+            return cached.Data;
+        }
+
+        Dictionary<string, object> rawWorldData = WorldGenerator.LoadWorldDataBinary(normalizedPath);
+        LoadedWorldData loadedWorldData = ReconstructWorldData(rawWorldData);
+        LoadedWorldDataCache[normalizedPath] = new CachedLoadedWorldData(lastWriteUtc, loadedWorldData);
+        return loadedWorldData;
+    }
+
+    private GeneratedTerrainBatchState BuildGeneratedTerrainBatchState(
+        TileGenerator tileGenerator,
+        LoadedWorldData loadedWorldData,
+        GenerationSettings settings,
+        int pipelineId)
+    {
+        string cacheKey = BuildGeneratedTerrainBatchCacheKey(loadedWorldData, settings);
+        if (cachedTerrainBatch != null && cachedTerrainBatch.CacheKey == cacheKey)
+        {
+            return cachedTerrainBatch.CreateState(pipelineId);
+        }
+
+        var requests = new List<GeneratedTerrainRequest>();
         double batchMinHeight = double.MaxValue;
         double batchMaxHeight = double.MinValue;
-        int terrainGroupId = GetGeneratedTerrainGroupId();
 
-        for (int offsetY = minOffset; offsetY <= maxOffset; offsetY++)
+        if (load3x3Neighborhood)
         {
-            for (int offsetX = minOffset; offsetX <= maxOffset; offsetX++)
+            int centerWorldTileY = invertUnityYForWorldGen ? -unityTileCoordinate.y : unityTileCoordinate.y;
+            TileLayersBatch batch = tileGenerator.GenerateTileLayersBatch(
+                unityTileCoordinate.x,
+                centerWorldTileY,
+                1,
+                settings.TileSize,
+                settings.HillSpacing,
+                settings.HillStrength);
+
+            for (int i = 0; i < batch.Entries.Count; i++)
             {
-                int unityTileX = unityTileCoordinate.x + offsetX;
-                int unityTileY = unityTileCoordinate.y + offsetY;
-                int worldTileY = invertUnityYForWorldGen ? -unityTileY : unityTileY;
-
-                TileLayers layers = tileGenerator.GenerateTileLayers(
-                    unityTileX,
-                    worldTileY,
-                    settings.TileSize,
-                    settings.HillSpacing,
-                    settings.HillStrength);
-
-                string terrainObjectName = GetTerrainObjectName(offsetX, offsetY, unityTileX, unityTileY);
-                Vector3 localPosition = new Vector3(offsetX * terrainWidth, 0f, offsetY * terrainLength);
-                CalculateHeightRange(layers.Heightmap, out double tileMinHeight, out double tileMaxHeight);
+                TileLayersBatchEntry entry = batch.Entries[i];
+                int unityOffsetY = invertUnityYForWorldGen ? -entry.OffsetY : entry.OffsetY;
+                int unityTileX = unityTileCoordinate.x + entry.OffsetX;
+                int unityTileY = unityTileCoordinate.y + unityOffsetY;
+                Vector3 localPosition = new(entry.OffsetX * terrainWidth, 0f, unityOffsetY * terrainLength);
+                string terrainObjectName = GetTerrainObjectName(entry.OffsetX, unityOffsetY, unityTileX, unityTileY);
+                CalculateHeightRange(entry.Layers.Heightmap, out double tileMinHeight, out double tileMaxHeight);
                 batchMinHeight = Math.Min(batchMinHeight, tileMinHeight);
                 batchMaxHeight = Math.Max(batchMaxHeight, tileMaxHeight);
-                terrainsToCreate.Add(new GeneratedTerrainRequest(
-                    layers,
+                requests.Add(new GeneratedTerrainRequest(
+                    entry.Layers,
                     terrainObjectName,
                     localPosition,
                     unityTileX,
                     unityTileY,
                     tileMinHeight,
                     tileMaxHeight,
-                    GetCenterTileHilliness(layers)));
+                    GetCenterTileHilliness(entry.Layers)));
             }
+        }
+        else
+        {
+            int unityTileX = unityTileCoordinate.x;
+            int unityTileY = unityTileCoordinate.y;
+            int worldTileY = invertUnityYForWorldGen ? -unityTileY : unityTileY;
+            TileLayers layers = tileGenerator.GenerateTileLayers(
+                unityTileX,
+                worldTileY,
+                settings.TileSize,
+                settings.HillSpacing,
+                settings.HillStrength);
+            CalculateHeightRange(layers.Heightmap, out double tileMinHeight, out double tileMaxHeight);
+            batchMinHeight = tileMinHeight;
+            batchMaxHeight = tileMaxHeight;
+            requests.Add(new GeneratedTerrainRequest(
+                layers,
+                generatedTerrainName,
+                Vector3.zero,
+                unityTileX,
+                unityTileY,
+                tileMinHeight,
+                tileMaxHeight,
+                GetCenterTileHilliness(layers)));
+        }
+
+        if (requests.Count == 0)
+        {
+            return new GeneratedTerrainBatchState(
+                cacheKey,
+                pipelineId,
+                Array.Empty<GeneratedTerrainRequest>(),
+                loadedWorldData.GlobalMinHeight,
+                loadedWorldData.GlobalMaxHeight);
         }
 
         double normalizationMinHeight = Math.Min(loadedWorldData.GlobalMinHeight, batchMinHeight);
         double normalizationMaxHeight = Math.Max(loadedWorldData.GlobalMaxHeight, batchMaxHeight);
+        cachedTerrainBatch = new GeneratedTerrainBatchCacheEntry(
+            cacheKey,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            requests);
+        return cachedTerrainBatch.CreateState(pipelineId);
+    }
 
-        for (int i = 0; i < terrainsToCreate.Count; i++)
+    private string BuildGeneratedTerrainBatchCacheKey(LoadedWorldData loadedWorldData, GenerationSettings settings)
+    {
+        string worldPath = ResolveWorldDataFilePath(worldDataFile);
+        long worldTicks = File.Exists(worldPath) ? File.GetLastWriteTimeUtc(worldPath).Ticks : 0L;
+        string vegetationObjectsPath = Path.Combine(Application.dataPath, "Resources", "VegetationConfig", "vegetation_objects.json");
+        string vegetationRulesPath = Path.Combine(Application.dataPath, "..", "Packages", "com.niklasaust.worldgen", "VegetationConfig", "vegetation_biome_rules.json");
+        long vegetationObjectsTicks = File.Exists(vegetationObjectsPath) ? File.GetLastWriteTimeUtc(vegetationObjectsPath).Ticks : 0L;
+        long vegetationRulesTicks = File.Exists(vegetationRulesPath) ? File.GetLastWriteTimeUtc(vegetationRulesPath).Ticks : 0L;
+
+        return string.Join(
+            "|",
+            Path.GetFullPath(worldPath),
+            worldTicks.ToString(CultureInfo.InvariantCulture),
+            vegetationObjectsTicks.ToString(CultureInfo.InvariantCulture),
+            vegetationRulesTicks.ToString(CultureInfo.InvariantCulture),
+            loadedWorldData.Seed.ToString(CultureInfo.InvariantCulture),
+            unityTileCoordinate.x.ToString(CultureInfo.InvariantCulture),
+            unityTileCoordinate.y.ToString(CultureInfo.InvariantCulture),
+            invertUnityYForWorldGen ? "invert" : "normal",
+            load3x3Neighborhood ? "3x3" : "single",
+            settings.TileSize.ToString(CultureInfo.InvariantCulture),
+            settings.HillSpacing.ToString(CultureInfo.InvariantCulture),
+            settings.HillStrength.ToString("R", CultureInfo.InvariantCulture),
+            terrainWidth.ToString("R", CultureInfo.InvariantCulture),
+            terrainLength.ToString("R", CultureInfo.InvariantCulture),
+            terrainHeight.ToString("R", CultureInfo.InvariantCulture),
+            terrainGridSize.ToString(CultureInfo.InvariantCulture),
+            riverWidthMultiplier.ToString("R", CultureInfo.InvariantCulture),
+            riverDepthMultiplier.ToString("R", CultureInfo.InvariantCulture),
+            riverBankDepthMultiplier.ToString("R", CultureInfo.InvariantCulture),
+            riverCenterDepthMultiplier.ToString("R", CultureInfo.InvariantCulture),
+            riverCenterCarveWidthMultiplier.ToString("R", CultureInfo.InvariantCulture),
+            riverProfileMinDropMetersPerTile.ToString("R", CultureInfo.InvariantCulture),
+            riverProfileMaxDropMetersPerTile.ToString("R", CultureInfo.InvariantCulture),
+            riverCorridorDepressionMeters.ToString("R", CultureInfo.InvariantCulture),
+            riverCorridorMaxSlopeMetersPerSample.ToString("R", CultureInfo.InvariantCulture),
+            riverCorridorRadiusMultiplier.ToString("R", CultureInfo.InvariantCulture),
+            riverCorridorMinRadiusSamples.ToString(CultureInfo.InvariantCulture),
+            riverCorridorSmoothingStrength.ToString("R", CultureInfo.InvariantCulture),
+            riverCorridorSmoothingKernelRadius.ToString(CultureInfo.InvariantCulture),
+            riverCorridorSmoothingPasses.ToString(CultureInfo.InvariantCulture),
+            riverFinalSmoothingStrength.ToString("R", CultureInfo.InvariantCulture),
+            riverFinalSmoothingKernelRadius.ToString(CultureInfo.InvariantCulture),
+            riverFinalSmoothingPasses.ToString(CultureInfo.InvariantCulture),
+            riverFinalSmoothingRetainedDepthFraction.ToString("R", CultureInfo.InvariantCulture),
+            placeTreeObjects ? "trees" : "noTrees",
+            placeSurfaceObjects ? "surface" : "noSurface");
+    }
+
+    private void ScheduleDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
+    {
+        if (batchState.PipelineId != activeGenerationPipelineId)
         {
-            GeneratedTerrainRequest request = terrainsToCreate[i];
-            GStylizedTerrain terrain = CreateTerrain(
-                request.Layers,
-                request.TerrainObjectName,
-                request.LocalPosition,
-                request.UnityTileX,
-                request.UnityTileY,
-                normalizationMinHeight,
-                normalizationMaxHeight,
-                request.LocalMinHeight,
-                request.LocalMaxHeight,
-                request.TileHilliness,
-                terrainGroupId);
-            createdTerrains.Add(terrain);
+            return;
         }
 
-        if (createdTerrains.Count > 0)
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
         {
-            RebuildTerrainSeams(createdTerrains);
-            ApplyTerrainShading(createdTerrains);
-            PopulateRiverDebugSplines(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
-            PopulateRiverWater(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
-            PopulateVegetation(terrainsToCreate, createdTerrains, normalizationMinHeight, normalizationMaxHeight);
-            if (Application.isPlaying)
-            {
-                UpdateConiferOptimization(forceFullIfNoTarget: true);
-            }
+            EditorApplication.delayCall += () => ContinueDeferredGenerationPhases(batchState);
+            return;
         }
+#endif
+
+        StartCoroutine(ContinueDeferredGenerationPhasesNextFrame(batchState));
+    }
+
+    private IEnumerator ContinueDeferredGenerationPhasesNextFrame(GeneratedTerrainBatchState batchState)
+    {
+        yield return null;
+        ContinueDeferredGenerationPhases(batchState);
+    }
+
+    private void ContinueDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
+    {
+        if (batchState.PipelineId != activeGenerationPipelineId || this == null)
+        {
+            return;
+        }
+
+        switch (batchState.NextDeferredPhase)
+        {
+            case DeferredGenerationPhase.RiverWater:
+                batchState.NextDeferredPhase = DeferredGenerationPhase.DebugSplines;
+                MeasureGenerationPhase(
+                    RiverWaterMarker,
+                    "river water",
+                    () => PopulateRiverWater(
+                        batchState.Requests,
+                        batchState.CreatedTerrains,
+                        batchState.NormalizationMinHeight,
+                        batchState.NormalizationMaxHeight,
+                        batchState.RiverSplineCache));
+                break;
+            case DeferredGenerationPhase.DebugSplines:
+                batchState.NextDeferredPhase = DeferredGenerationPhase.Vegetation;
+                MeasureGenerationPhase(
+                    RiverSplineMarker,
+                    "river debug splines",
+                    () => PopulateRiverDebugSplines(
+                        batchState.Requests,
+                        batchState.CreatedTerrains,
+                        batchState.NormalizationMinHeight,
+                        batchState.NormalizationMaxHeight,
+                        batchState.RiverSplineCache));
+                break;
+            case DeferredGenerationPhase.Vegetation:
+                batchState.NextDeferredPhase = DeferredGenerationPhase.Completed;
+                MeasureGenerationPhase(
+                    VegetationPlacementMarker,
+                    "vegetation placement",
+                    () => PopulateVegetation(
+                        batchState.Requests,
+                        batchState.CreatedTerrains,
+                        batchState.NormalizationMinHeight,
+                        batchState.NormalizationMaxHeight));
+                if (Application.isPlaying)
+                {
+                    UpdateConiferOptimization(forceFullIfNoTarget: true);
+                }
+
+                break;
+            default:
+                return;
+        }
+
+        if (batchState.NextDeferredPhase != DeferredGenerationPhase.Completed)
+        {
+            ScheduleDeferredGenerationPhases(batchState);
+        }
+    }
+
+    private void MeasureGenerationPhase(ProfilerMarker marker, string phaseName, Action action)
+    {
+        using (marker.Auto())
+        {
+            var stopwatch = Stopwatch.StartNew();
+            action();
+            stopwatch.Stop();
+            LogGenerationPhaseTiming(phaseName, stopwatch.Elapsed);
+        }
+    }
+
+    private T MeasureGenerationPhase<T>(ProfilerMarker marker, string phaseName, Func<T> action)
+    {
+        using (marker.Auto())
+        {
+            var stopwatch = Stopwatch.StartNew();
+            T result = action();
+            stopwatch.Stop();
+            LogGenerationPhaseTiming(phaseName, stopwatch.Elapsed);
+            return result;
+        }
+    }
+
+    private void LogGenerationPhaseTiming(string phaseName, System.TimeSpan elapsed)
+    {
+        if (!logGenerationPhaseTimings)
+        {
+            return;
+        }
+
+        UnityEngine.Debug.Log(
+            $"TileLoader {phaseName} completed in {elapsed.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture)} ms.",
+            this);
     }
 
     private void ClearGeneratedTerrains()
@@ -1387,7 +1676,8 @@ public sealed class TileLoader : MonoBehaviour
         IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
         IReadOnlyList<GStylizedTerrain> terrains,
         double normalizationMinHeight,
-        double normalizationMaxHeight)
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache)
     {
         if (!createRiverWater)
         {
@@ -1425,10 +1715,12 @@ public sealed class TileLoader : MonoBehaviour
             Mesh? riverMesh = BuildRiverWaterMesh(
                 terrain,
                 request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
+                request,
                 riverPaths,
                 request.Layers.RiverInfo,
                 riverWaterSeams,
-            request.Layers.RiverUsesProfile,
+                request.Layers.RiverUsesProfile,
+                riverSplineCache,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             if (riverMesh == null)
@@ -1458,7 +1750,8 @@ public sealed class TileLoader : MonoBehaviour
         IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
         IReadOnlyList<GStylizedTerrain> terrains,
         double normalizationMinHeight,
-        double normalizationMaxHeight)
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache)
     {
         if (!createRiverDebugSplines)
         {
@@ -1486,7 +1779,9 @@ public sealed class TileLoader : MonoBehaviour
             IReadOnlyList<Spline> splines = BuildRiverDebugSplines(
                 terrain,
                 request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
+                request,
                 riverPaths,
+                riverSplineCache,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             splineContainer.Splines = splines;
@@ -1531,10 +1826,12 @@ public sealed class TileLoader : MonoBehaviour
     private Mesh? BuildRiverWaterMesh(
         GStylizedTerrain? terrain,
         double[,] heightmap,
+        GeneratedTerrainRequest request,
         IReadOnlyList<RiverSurfacePath> riverPaths,
         RiverInfo? riverInfo,
         IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
         bool usesRiverProfile,
+        Dictionary<string, Spline> riverSplineCache,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -1546,10 +1843,13 @@ public sealed class TileLoader : MonoBehaviour
             Mesh? pathMesh = BuildRiverWaterMesh(
                 terrain,
                 heightmap,
+                request,
                 riverPaths[i],
+                i,
                 riverInfo,
                 riverWaterSeams,
                 usesRiverProfile,
+                riverSplineCache,
                 normalizationMinHeight,
                 normalizationMaxHeight);
             if (pathMesh == null)
@@ -1595,10 +1895,13 @@ public sealed class TileLoader : MonoBehaviour
     private Mesh? BuildRiverWaterMesh(
         GStylizedTerrain? terrain,
         double[,] heightmap,
+        GeneratedTerrainRequest request,
         RiverSurfacePath riverPath,
+        int riverPathIndex,
         RiverInfo? riverInfo,
         IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
         bool usesRiverProfile,
+        Dictionary<string, Spline> riverSplineCache,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -1618,10 +1921,13 @@ public sealed class TileLoader : MonoBehaviour
         if (!TryBuildRiverWaterSplineSamples(
                 terrain,
                 heightmap,
+                request,
                 riverPath,
+                riverPathIndex,
                 pathPoints,
                 sampleSpacingX,
                 sampleSpacingZ,
+                riverSplineCache,
                 normalizationMinHeight,
                 normalizationMaxHeight,
                 centers,
@@ -1990,7 +2296,9 @@ public sealed class TileLoader : MonoBehaviour
     private IReadOnlyList<Spline> BuildRiverDebugSplines(
         GStylizedTerrain terrain,
         double[,] heightmap,
+        GeneratedTerrainRequest request,
         IReadOnlyList<RiverSurfacePath> riverPaths,
+        Dictionary<string, Spline> riverSplineCache,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -2005,7 +2313,10 @@ public sealed class TileLoader : MonoBehaviour
             Spline? spline = BuildRiverDebugSpline(
                 terrain,
                 heightmap,
+                request,
                 riverPaths[i],
+                i,
+                riverSplineCache,
                 sampleSpacingX,
                 sampleSpacingZ,
                 normalizationMinHeight,
@@ -2022,49 +2333,28 @@ public sealed class TileLoader : MonoBehaviour
     private Spline? BuildRiverDebugSpline(
         GStylizedTerrain terrain,
         double[,] heightmap,
+        GeneratedTerrainRequest request,
         RiverSurfacePath riverPath,
+        int riverPathIndex,
+        Dictionary<string, Spline> riverSplineCache,
         float sampleSpacingX,
         float sampleSpacingZ,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
-        IReadOnlyList<RiverSurfacePoint> pathPoints = riverPath.Points;
-        if (pathPoints.Count < 2)
-        {
-            return null;
-        }
-
-        var spline = new Spline();
-        float terrainSampleSpacingX = Mathf.Max(0.05f, sampleSpacingX);
-        float terrainSampleSpacingZ = Mathf.Max(0.05f, sampleSpacingZ);
-
-        for (int i = 0; i < pathPoints.Count; i++)
-        {
-            RiverSurfacePoint pathPoint = pathPoints[i];
-            Vector3 localPoint = GetTerrainLocalPoint(
-                terrain,
-                heightmap,
-                pathPoint.X,
-                pathPoint.Y,
-                normalizationMinHeight,
-                normalizationMaxHeight,
-                0f);
-
-            if (TrySampleGeneratedTerrainLocalMinimumPoint3x3(
-                    terrain,
-                    localPoint.x,
-                    localPoint.z,
-                    terrainSampleSpacingX,
-                    terrainSampleSpacingZ,
-                    out float sampledMinY))
-            {
-                localPoint.y = sampledMinY;
-            }
-
-            spline.Add(new float3(localPoint.x, localPoint.y, localPoint.z), TangentMode.Linear);
-        }
-
-        return spline.Count >= 2 ? spline : null;
+        return GetOrBuildRiverTerrainConformedSpline(
+            riverSplineCache,
+            request,
+            riverPathIndex,
+            terrain,
+            heightmap,
+            riverPath,
+            sampleSpacingX,
+            sampleSpacingZ,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            1,
+            TangentMode.Linear);
     }
 
     private Spline? BuildRiverTerrainConformedSpline(
@@ -2129,13 +2419,63 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
-    private bool TryBuildRiverWaterSplineSamples(
+    private Spline? GetOrBuildRiverTerrainConformedSpline(
+        Dictionary<string, Spline> riverSplineCache,
+        GeneratedTerrainRequest request,
+        int riverPathIndex,
         GStylizedTerrain? terrain,
         double[,] heightmap,
         RiverSurfacePath riverPath,
+        float sampleSpacingX,
+        float sampleSpacingZ,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        int knotStep,
+        TangentMode tangentMode)
+    {
+        string cacheKey = string.Join(
+            "|",
+            request.UnityTileX.ToString(CultureInfo.InvariantCulture),
+            request.UnityTileY.ToString(CultureInfo.InvariantCulture),
+            riverPathIndex.ToString(CultureInfo.InvariantCulture),
+            knotStep.ToString(CultureInfo.InvariantCulture),
+            ((int)tangentMode).ToString(CultureInfo.InvariantCulture),
+            heightmap.GetLength(0).ToString(CultureInfo.InvariantCulture),
+            heightmap.GetLength(1).ToString(CultureInfo.InvariantCulture));
+
+        if (riverSplineCache.TryGetValue(cacheKey, out Spline cachedSpline))
+        {
+            return cachedSpline;
+        }
+
+        Spline? spline = BuildRiverTerrainConformedSpline(
+            terrain,
+            heightmap,
+            riverPath,
+            sampleSpacingX,
+            sampleSpacingZ,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            knotStep,
+            tangentMode);
+        if (spline != null)
+        {
+            riverSplineCache[cacheKey] = spline;
+        }
+
+        return spline;
+    }
+
+    private bool TryBuildRiverWaterSplineSamples(
+        GStylizedTerrain? terrain,
+        double[,] heightmap,
+        GeneratedTerrainRequest request,
+        RiverSurfacePath riverPath,
+        int riverPathIndex,
         IReadOnlyList<RiverSurfacePoint> pathPoints,
         float sampleSpacingX,
         float sampleSpacingZ,
+        Dictionary<string, Spline> riverSplineCache,
         double normalizationMinHeight,
         double normalizationMaxHeight,
         List<Vector3> centers,
@@ -2143,7 +2483,10 @@ public sealed class TileLoader : MonoBehaviour
         List<(bool IsSeam, string? Direction, bool IsStart)> sampleSeams)
     {
         int splineStep = Math.Max(1, riverSplineSamplingStep);
-        Spline? spline = BuildRiverTerrainConformedSpline(
+        Spline? spline = GetOrBuildRiverTerrainConformedSpline(
+            riverSplineCache,
+            request,
+            riverPathIndex,
             terrain,
             heightmap,
             riverPath,
@@ -2214,10 +2557,19 @@ public sealed class TileLoader : MonoBehaviour
             return riverWaterMaterial;
         }
 
+        string assetPath = GetRiverWaterMaterialAssetPath();
+        if (cachedRiverWaterMaterial != null &&
+            string.Equals(cachedRiverWaterMaterialPath, assetPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return cachedRiverWaterMaterial;
+        }
+
 #if UNITY_EDITOR
-        Material material = AssetDatabase.LoadAssetAtPath<Material>(GetRiverWaterMaterialAssetPath());
+        Material material = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
         if (material != null)
         {
+            cachedRiverWaterMaterial = material;
+            cachedRiverWaterMaterialPath = assetPath;
             return material;
         }
 #endif
@@ -2459,15 +2811,38 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
-        for (int i = 0; i < terrainCount; i++)
+        if (UsesLegacyVegetationObjects())
         {
-            GeneratedTerrainRequest request = terrainRequests[i];
-            GStylizedTerrain terrain = terrains[i];
-            PopulatePlacedObjects(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+            MeasureGenerationPhase(
+                VegetationRenderMarker,
+                "vegetation GameObject instantiation",
+                () =>
+                {
+                    for (int i = 0; i < terrainCount; i++)
+                    {
+                        GeneratedTerrainRequest request = terrainRequests[i];
+                        GStylizedTerrain terrain = terrains[i];
+                        PopulatePlacedObjectsLegacy(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+                    }
+                });
+            return;
         }
+
+        MeasureGenerationPhase(
+            VegetationRenderMarker,
+            "vegetation instancing",
+            () =>
+            {
+                for (int i = 0; i < terrainCount; i++)
+                {
+                    GeneratedTerrainRequest request = terrainRequests[i];
+                    GStylizedTerrain terrain = terrains[i];
+                    PopulatePlacedObjectsHybrid(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+                }
+            });
     }
 
-    private void PopulatePlacedObjects(
+    private void PopulatePlacedObjectsLegacy(
         GStylizedTerrain terrain,
         GeneratedTerrainRequest request,
         double normalizationMinHeight,
@@ -2499,38 +2874,155 @@ public sealed class TileLoader : MonoBehaviour
             }
 
             vegetationContainer ??= CreateVegetationContainer(terrain.transform);
-            GameObject? instance = InstantiatePlacementPrefab(prefab);
-            if (instance == null)
+            InstantiateLegacyPlacement(
+                terrain,
+                request,
+                placement,
+                prefab,
+                isTreeObject,
+                vegetationContainer,
+                normalizationMinHeight,
+                normalizationMaxHeight);
+        }
+    }
+
+    private void PopulatePlacedObjectsHybrid(
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        if (terrain == null || request.Layers.PlacedObjects == null || request.Layers.PlacedObjects.Count == 0)
+        {
+            return;
+        }
+
+        Transform? vegetationContainer = null;
+        var prototypes = new List<TileLoaderInstancedVegetationPrototype>();
+        var placements = new List<TileLoaderInstancedVegetationPlacement>();
+        var prototypeIndices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (TileObjectPlacement placement in request.Layers.PlacedObjects)
+        {
+            GameObject? prefab = LoadPrefabForPlacement(placement);
+            if (prefab == null)
             {
                 continue;
             }
 
-            instance.name = prefab.name;
-            instance.transform.SetParent(vegetationContainer, false);
-            instance.transform.localScale = Vector3.one;
-            if (isTreeObject)
+            bool isTreeObject = IsTreePlacement(placement, prefab);
+            if (isTreeObject && !placeTreeObjects)
             {
-                instance.transform.localPosition = GetPlacementLocalPosition(
-                    terrain,
-                    request.Layers.Heightmap,
+                continue;
+            }
+
+            if (!isTreeObject && !placeSurfaceObjects)
+            {
+                continue;
+            }
+
+            TileLoaderInstancedVegetationPrototype? prototype = GetOrCreateVegetationPrototype(placement, prefab, isTreeObject);
+            if (prototype != null &&
+                TryBuildInstancedPlacement(
+                    request,
                     placement,
+                    prototype,
                     normalizationMinHeight,
                     normalizationMaxHeight,
-                    treeObjectVerticalOffset);
-                instance.transform.localRotation = Quaternion.identity;
-                RegisterGeneratedConifer(instance);
-            }
-            else
+                    out TileLoaderInstancedVegetationPlacement instancedPlacement))
             {
-                PlaceSurfaceObjectInstance(
-                    instance.transform,
-                    request.Layers.Heightmap,
-                    placement,
-                    normalizationMinHeight,
-                    normalizationMaxHeight);
-                RegisterGeneratedSurfaceObject(instance);
+                vegetationContainer ??= CreateVegetationContainer(terrain.transform);
+                if (!prototypeIndices.TryGetValue(prototype.Key, out int prototypeIndex))
+                {
+                    prototypeIndex = prototypes.Count;
+                    prototypeIndices[prototype.Key] = prototypeIndex;
+                    prototypes.Add(prototype);
+                }
+
+                placements.Add(new TileLoaderInstancedVegetationPlacement(
+                    prototypeIndex,
+                    instancedPlacement.LocalPosition,
+                    instancedPlacement.LocalRotation,
+                    instancedPlacement.LocalScale));
+                continue;
             }
+
+            if (vegetationLoadMode == VegetationLoadMode.InstancesOnly)
+            {
+                continue;
+            }
+
+            vegetationContainer ??= CreateVegetationContainer(terrain.transform);
+            InstantiateLegacyPlacement(
+                terrain,
+                request,
+                placement,
+                prefab,
+                isTreeObject,
+                vegetationContainer,
+                normalizationMinHeight,
+                normalizationMaxHeight);
         }
+
+        if (vegetationContainer == null || placements.Count == 0)
+        {
+            return;
+        }
+
+        TileLoaderInstancedVegetationRenderer renderer = vegetationContainer.GetComponent<TileLoaderInstancedVegetationRenderer>();
+        if (renderer == null)
+        {
+            renderer = vegetationContainer.gameObject.AddComponent<TileLoaderInstancedVegetationRenderer>();
+        }
+
+        renderer.Initialize(
+            prototypes,
+            placements,
+            vegetationLoadMode == VegetationLoadMode.HybridInteractive,
+            vegetationInteractionRadiusMeters,
+            vegetationInteractionHysteresisMeters);
+    }
+
+    private void InstantiateLegacyPlacement(
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        TileObjectPlacement placement,
+        GameObject prefab,
+        bool isTreeObject,
+        Transform vegetationContainer,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        GameObject? instance = InstantiatePlacementPrefab(prefab);
+        if (instance == null)
+        {
+            return;
+        }
+
+        instance.name = prefab.name;
+        instance.transform.SetParent(vegetationContainer, false);
+        instance.transform.localScale = Vector3.one;
+        if (isTreeObject)
+        {
+            instance.transform.localPosition = GetPlacementLocalPosition(
+                terrain,
+                request.Layers.Heightmap,
+                placement,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                treeObjectVerticalOffset);
+            instance.transform.localRotation = Quaternion.identity;
+            RegisterGeneratedConifer(instance);
+            return;
+        }
+
+        PlaceSurfaceObjectInstance(
+            instance.transform,
+            request.Layers.Heightmap,
+            placement,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        RegisterGeneratedSurfaceObject(instance);
     }
 
     private Transform CreateVegetationContainer(Transform terrainTransform)
@@ -2552,6 +3044,164 @@ public sealed class TileLoader : MonoBehaviour
         return container.transform;
     }
 
+    private TileLoaderInstancedVegetationPrototype? GetOrCreateVegetationPrototype(
+        TileObjectPlacement placement,
+        GameObject prefab,
+        bool isTreeObject)
+    {
+        string? rawPath = placement.PrefabPath ?? placement.Definition.PrefabPath;
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return null;
+        }
+
+        string cacheKey = (isTreeObject ? "tree:" : "surface:") + rawPath.Replace('\\', '/').Trim();
+        if (vegetationPrototypeCache.TryGetValue(cacheKey, out TileLoaderInstancedVegetationPrototype? cachedPrototype))
+        {
+            return cachedPrototype;
+        }
+
+        if (prefab.GetComponentsInChildren<SkinnedMeshRenderer>(true).Length > 0 ||
+            prefab.GetComponentsInChildren<Animator>(true).Length > 0 ||
+            prefab.GetComponentsInChildren<ParticleSystem>(true).Length > 0 ||
+            prefab.GetComponentsInChildren<TerrainConformBlanket>(true).Length > 0)
+        {
+            vegetationPrototypeCache[cacheKey] = null;
+            return null;
+        }
+
+        Renderer[] candidateRenderers = ResolveInstancedPrototypeRenderers(prefab, isTreeObject);
+        var renderSources = new List<TileLoaderInstancedVegetationRenderSource>();
+        Matrix4x4 rootWorldToLocal = prefab.transform.worldToLocalMatrix;
+        for (int rendererIndex = 0; rendererIndex < candidateRenderers.Length; rendererIndex++)
+        {
+            Renderer renderer = candidateRenderers[rendererIndex];
+            if (renderer == null || !renderer.TryGetComponent(out MeshFilter meshFilter))
+            {
+                continue;
+            }
+
+            Mesh mesh = meshFilter.sharedMesh;
+            if (mesh == null)
+            {
+                continue;
+            }
+
+            Material[] materials = renderer.sharedMaterials;
+            int subMeshCount = Math.Min(mesh.subMeshCount, materials.Length);
+            Matrix4x4 localMatrix = rootWorldToLocal * renderer.transform.localToWorldMatrix;
+            for (int subMeshIndex = 0; subMeshIndex < subMeshCount; subMeshIndex++)
+            {
+                Material material = materials[subMeshIndex];
+                if (material == null)
+                {
+                    continue;
+                }
+
+                renderSources.Add(new TileLoaderInstancedVegetationRenderSource(
+                    mesh,
+                    subMeshIndex,
+                    material,
+                    localMatrix,
+                    renderer.shadowCastingMode,
+                    renderer.receiveShadows,
+                    placement.Definition.Layer));
+            }
+        }
+
+        TileLoaderInstancedVegetationPrototype? prototype = renderSources.Count == 0
+            ? null
+            : new TileLoaderInstancedVegetationPrototype(
+                cacheKey,
+                prefab,
+                isTreeObject,
+                isTreeObject,
+                renderSources);
+        vegetationPrototypeCache[cacheKey] = prototype;
+        return prototype;
+    }
+
+    private static Renderer[] ResolveInstancedPrototypeRenderers(GameObject prefab, bool isTreeObject)
+    {
+        if (prefab == null)
+        {
+            return Array.Empty<Renderer>();
+        }
+
+        LODGroup lodGroup = prefab.GetComponentInChildren<LODGroup>(true);
+        if (isTreeObject && lodGroup != null)
+        {
+            LOD[] lods = lodGroup.GetLODs();
+            for (int lodIndex = lods.Length - 1; lodIndex >= 0; lodIndex--)
+            {
+                Renderer[] lodRenderers = lods[lodIndex].renderers;
+                if (lodRenderers != null && lodRenderers.Length > 0)
+                {
+                    return lodRenderers;
+                }
+            }
+        }
+
+        return prefab.GetComponentsInChildren<MeshRenderer>(true);
+    }
+
+    private bool TryBuildInstancedPlacement(
+        GeneratedTerrainRequest request,
+        TileObjectPlacement placement,
+        TileLoaderInstancedVegetationPrototype prototype,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        out TileLoaderInstancedVegetationPlacement instancedPlacement)
+    {
+        instancedPlacement = default;
+        if (prototype == null)
+        {
+            return false;
+        }
+
+        Vector3 localPosition;
+        Quaternion localRotation;
+        if (prototype.IsTree)
+        {
+            localPosition = GetTerrainLocalPoint(
+                null,
+                request.Layers.Heightmap,
+                placement.X,
+                placement.Y,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                treeObjectVerticalOffset);
+            localRotation = Quaternion.identity;
+        }
+        else
+        {
+            Vector3 localSurfacePoint = GetTerrainLocalPoint(
+                null,
+                request.Layers.Heightmap,
+                placement.X,
+                placement.Y,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                surfaceObjectVerticalOffset);
+            Vector3 localSurfaceNormal = GetTerrainLocalNormal(
+                null,
+                request.Layers.Heightmap,
+                placement.X,
+                placement.Y,
+                normalizationMinHeight,
+                normalizationMaxHeight);
+            localRotation = Quaternion.FromToRotation(Vector3.up, localSurfaceNormal);
+            localPosition = localSurfacePoint + localSurfaceNormal * GetSurfaceObjectOffset();
+        }
+
+        instancedPlacement = new TileLoaderInstancedVegetationPlacement(
+            0,
+            localPosition,
+            localRotation,
+            Vector3.one);
+        return true;
+    }
+
     private static GameObject? InstantiatePlacementPrefab(GameObject prefab)
     {
 #if UNITY_EDITOR
@@ -2571,6 +3221,12 @@ public sealed class TileLoader : MonoBehaviour
             return null;
         }
 
+        string cacheKey = rawPath.Replace('\\', '/').Trim();
+        if (prefabCache.TryGetValue(cacheKey, out GameObject? cachedPrefab))
+        {
+            return cachedPrefab;
+        }
+
 #if UNITY_EDITOR
         string? assetPath = NormalizeAssetPath(rawPath);
         if (!string.IsNullOrEmpty(assetPath))
@@ -2578,6 +3234,7 @@ public sealed class TileLoader : MonoBehaviour
             GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             if (asset != null)
             {
+                prefabCache[cacheKey] = asset;
                 return asset;
             }
         }
@@ -2589,10 +3246,12 @@ public sealed class TileLoader : MonoBehaviour
             GameObject resource = Resources.Load<GameObject>(resourcesPath);
             if (resource != null)
             {
+                prefabCache[cacheKey] = resource;
                 return resource;
             }
         }
 
+        prefabCache[cacheKey] = null;
         Debug.LogWarning($"TileLoader could not resolve prefab path '{rawPath}' for placement '{placement.Definition.Id}'.", this);
         return null;
     }
@@ -3460,6 +4119,8 @@ public sealed class TileLoader : MonoBehaviour
         lowDetailConiferDistance = Mathf.Max(reducedConiferDistance, lowDetailConiferDistance);
         culledConiferDistance = Mathf.Max(lowDetailConiferDistance, culledConiferDistance);
         coniferOptimizationInterval = Mathf.Max(0.05f, coniferOptimizationInterval);
+        vegetationInteractionRadiusMeters = Mathf.Max(0f, vegetationInteractionRadiusMeters);
+        vegetationInteractionHysteresisMeters = Mathf.Max(0f, vegetationInteractionHysteresisMeters);
     }
 
     private static Material? LoadDefaultMaterial(string assetPath)
@@ -4181,6 +4842,92 @@ public sealed class TileLoader : MonoBehaviour
         public double NormalizationMaxHeight;
         public float LocalMaxHeightMeters;
         public double TileHilliness;
+    }
+
+    private sealed class GeneratedTerrainBatchState
+    {
+        public GeneratedTerrainBatchState(
+            string cacheKey,
+            int pipelineId,
+            IReadOnlyList<GeneratedTerrainRequest> requests,
+            double normalizationMinHeight,
+            double normalizationMaxHeight)
+        {
+            CacheKey = cacheKey;
+            PipelineId = pipelineId;
+            Requests = requests?.ToArray() ?? Array.Empty<GeneratedTerrainRequest>();
+            NormalizationMinHeight = normalizationMinHeight;
+            NormalizationMaxHeight = normalizationMaxHeight;
+            CreatedTerrains = new List<GStylizedTerrain>(Requests.Count);
+            NextDeferredPhase = DeferredGenerationPhase.RiverWater;
+            RiverSplineCache = new Dictionary<string, Spline>(StringComparer.Ordinal);
+        }
+
+        public string CacheKey { get; }
+        public int PipelineId { get; }
+        public IReadOnlyList<GeneratedTerrainRequest> Requests { get; }
+        public double NormalizationMinHeight { get; }
+        public double NormalizationMaxHeight { get; }
+        public List<GStylizedTerrain> CreatedTerrains { get; }
+        public DeferredGenerationPhase NextDeferredPhase { get; set; }
+        public Dictionary<string, Spline> RiverSplineCache { get; }
+    }
+
+    private sealed class GeneratedTerrainBatchCacheEntry
+    {
+        public GeneratedTerrainBatchCacheEntry(
+            string cacheKey,
+            double normalizationMinHeight,
+            double normalizationMaxHeight,
+            IReadOnlyList<GeneratedTerrainRequest> requests)
+        {
+            CacheKey = cacheKey;
+            NormalizationMinHeight = normalizationMinHeight;
+            NormalizationMaxHeight = normalizationMaxHeight;
+            Requests = requests?.ToArray() ?? Array.Empty<GeneratedTerrainRequest>();
+        }
+
+        public string CacheKey { get; }
+        public double NormalizationMinHeight { get; }
+        public double NormalizationMaxHeight { get; }
+        public IReadOnlyList<GeneratedTerrainRequest> Requests { get; }
+
+        public GeneratedTerrainBatchState CreateState(int pipelineId)
+        {
+            return new GeneratedTerrainBatchState(
+                CacheKey,
+                pipelineId,
+                Requests,
+                NormalizationMinHeight,
+                NormalizationMaxHeight);
+        }
+    }
+
+    private readonly struct CachedLoadedWorldData
+    {
+        public CachedLoadedWorldData(DateTime lastWriteUtc, LoadedWorldData data)
+        {
+            LastWriteUtc = lastWriteUtc;
+            Data = data;
+        }
+
+        public DateTime LastWriteUtc { get; }
+        public LoadedWorldData Data { get; }
+    }
+
+    private enum DeferredGenerationPhase
+    {
+        RiverWater,
+        DebugSplines,
+        Vegetation,
+        Completed,
+    }
+
+    private enum VegetationLoadMode
+    {
+        LegacyGameObjects,
+        HybridInteractive,
+        InstancesOnly,
     }
 
     private enum TerrainShadingMode
