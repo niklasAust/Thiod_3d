@@ -202,8 +202,8 @@ Material:
     - _Trunk_Smoothness: 0.2
     - _UVSec: 0
     - _Use_Color_Noise: 0
-    - _Use_Global_Weather_Controller: 1
-    - _Use_Vertex_Color_Wind: 0
+    - _Use_Global_Weather_Controller: 0
+    - _Use_Vertex_Color_Wind: 1
     - _WindBaseline: 0
     - _WindDirection: 0
     - _Wind_Twist_Strength: 0.15

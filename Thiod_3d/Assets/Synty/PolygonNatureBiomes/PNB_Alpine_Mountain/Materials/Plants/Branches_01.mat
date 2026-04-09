@@ -52,13 +52,18 @@ Material:
   m_LockedProperties: 
   m_SavedProperties:
     serializedVersion: 3
-    m_TexEnvs: []
+    m_TexEnvs:
+    - _Trunk_Texture:
+        m_Texture: {fileID: 2800000, guid: 6db54f8174fe3384c9e82259f5c842f1, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _Alpha_Clip_Threshold: 0.25
+    - _Alpha_Clip_Threshold: 0
     - _ColourNoiseLargeScale: 0
     - _ColourNoiseSmallScale: 0
     - _Cutoff: 0.5
+    - _Enable_Frosting: 0
     - _Enable_Trunk_Normal: 0
     - _FrostingFalloff: 1
     - _FrostingHeight: 1
@@ -82,8 +87,11 @@ Material:
     - _Strong_Wind_Strength: 0.2
     - _TotalWindAmount: 0.5
     - _Trunk_Flat_Color_Switch: 0
+    - _Trunk_Metallic: 0
+    - _Trunk_Smoothness: 0
     - _Use_Color_Noise: 0
     - _Use_Global_Weather_Controller: 0
+    - _Use_Vertex_Color_Wind: 1
     - _WindDirection: 0.77
     - _Y_multiplier: -0.5
     m_Colors:

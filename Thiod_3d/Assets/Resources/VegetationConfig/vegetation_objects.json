@@ -6,9 +6,26 @@
         "prefab": "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab",
         "prefabs": [
             {
-                "path": "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab",
+                "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_01.prefab",
+                "probability": 0.0
+            },
+            {
+                "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_02.prefab",
+                "probability": 2.0
+            },
+            {
+                "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_Large_01.prefab",
+                "probability": 0.3
+            },
+            {
+                "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_Large_02.prefab",
+                "probability": 1.0
+            },
+            {
+                "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_Small_01.prefab",
                 "probability": 1.0
             }
+
         ],
         "previewColour": "#228B22"
     },
