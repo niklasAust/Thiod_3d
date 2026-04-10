@@ -40,6 +40,7 @@ Material:
   m_ValidKeywords:
   - _ALPHATEST_ON
   m_InvalidKeywords:
+  - _ALPHABLEND_ON
   - _EMISSION
   m_LightmapFlags: 4
   m_EnableInstancingVariants: 0
@@ -54,17 +55,17 @@ Material:
     serializedVersion: 3
     m_TexEnvs:
     - _Trunk_Texture:
-        m_Texture: {fileID: 2800000, guid: 6db54f8174fe3384c9e82259f5c842f1, type: 3}
+        m_Texture: {fileID: 2800000, guid: 1a4e4b9833bcf11468042ab2e91c749f, type: 3}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _Alpha_Clip_Threshold: 0
     - _ColourNoiseLargeScale: 0
     - _ColourNoiseSmallScale: 0
+    - _Cull: 0
     - _Cutoff: 0.5
+    - _DstBlend: 0
     - _Enable_Frosting: 0
-    - _Enable_Trunk_Normal: 0
     - _FrostingFalloff: 1
     - _FrostingHeight: 1
     - _FrostingSwitch: 0
@@ -84,16 +85,15 @@ Material:
     - _LeafSmoothness: 0.484
     - _Light_Wind_Strength: 0.2
     - _Metallic: 0.132
+    - _SrcBlend: 1
     - _Strong_Wind_Strength: 0.2
+    - _Surface: 0
     - _TotalWindAmount: 0.5
-    - _Trunk_Flat_Color_Switch: 0
-    - _Trunk_Metallic: 0
-    - _Trunk_Smoothness: 0
-    - _Use_Color_Noise: 0
     - _Use_Global_Weather_Controller: 0
     - _Use_Vertex_Color_Wind: 1
     - _WindDirection: 0.77
     - _Y_multiplier: -0.5
+    - _ZWrite: 1
     m_Colors:
     - _FrostingColour: {r: 1, g: 1, b: 1, a: 0}
     - _GustHighlight: {r: 0, g: 0, b: 0, a: 0}

@@ -42,6 +42,7 @@ Material:
   - _BUILTIN_ALPHATEST_ON
   - _BUILTIN_AlphaClip
   m_InvalidKeywords:
+  - _ALPHABLEND_ON
   - _EMISSION
   m_LightmapFlags: 2
   m_EnableInstancingVariants: 0
