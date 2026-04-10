@@ -163,8 +163,8 @@ public sealed class TileLoader : MonoBehaviour
     [FormerlySerializedAs("spreadVegetationInstancingAcrossFrames")]
     [SerializeField] private bool spreadVegetationPlacementAcrossFrames = true;
     [FormerlySerializedAs("vegetationInstancingFrameBudgetMilliseconds")]
-    [SerializeField, Min(0.25f)] private float vegetationPlacementBudgetMsPerFrame = 5f;
-    [SerializeField, Min(0.1f)] private float prototypeInitBudgetMsPerFrame = 1.25f;
+    [SerializeField, Min(0.25f)] private float vegetationPlacementBudgetMsPerFrame = 12f;
+    [SerializeField, Min(0.1f)] private float prototypeInitBudgetMsPerFrame = 4f;
     [SerializeField] private bool centerTileOnlyNonTreeBudgetFirst = true;
     [SerializeField, Min(0f)] private float highDetailPlacementRadiusMeters = 45f;
     [SerializeField, Min(0f)] private float midDetailPlacementRadiusMeters = 110f;
@@ -209,6 +209,7 @@ public sealed class TileLoader : MonoBehaviour
     [Header("Debug")]
     [SerializeField] private bool logHeightStats = true;
     [SerializeField] private bool logGenerationPhaseTimings = true;
+    [SerializeField] private bool logVegetationPlacementWorkItems = true;
     [SerializeField, HideInInspector] private List<GeneratedTerrainShadingMetadata> generatedTerrainShadingMetadata = new();
 
     private bool hasLoadedInCurrentEnableCycle;
@@ -1439,6 +1440,10 @@ public sealed class TileLoader : MonoBehaviour
             $"riverRefreshTiles={batchState.RiverRefreshTerrains.Count}, vegetationRefreshTiles={batchState.VegetationRefreshTerrains.Count}, " +
             $"vegGenerated={batchState.VegetationGeneratedPlacementCount}, vegKept={batchState.VegetationKeptPlacementCount}, " +
             $"vegSkippedPolicy={batchState.VegetationSkippedByPolicyCount}, vegSkippedDistance={batchState.VegetationSkippedByDistanceCount}, vegSkippedCap={batchState.VegetationSkippedByCapCount}, " +
+            $"vegQueuedPlacements={batchState.VegetationQueuedPlacementCount}, vegWorkItems={batchState.VegetationQueuedWorkItemCount}, " +
+            $"vegInstanced={batchState.VegetationInstancedPlacementCount}, vegLegacy={batchState.VegetationLegacyPlacementCount}, " +
+            $"vegExactConform={batchState.VegetationExactTerrainConformPlacementCount}, vegApprox={batchState.VegetationApproximatePlacementCount}, " +
+            $"vegDeferredFinalizes={batchState.VegetationDeferredRendererFinalizeCount}, vegRendererFinalizes={batchState.VegetationRendererFinalizeCount}, " +
             $"queuePrepCpuMs={batchState.VegetationQueuePrepCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"placementCpuMs={batchState.VegetationPlacementCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"prototypeCacheHits={batchState.VegetationPrototypeCacheHitCount}, prototypeCacheMisses={batchState.VegetationPrototypeCacheMissCount}, " +
@@ -1452,7 +1457,8 @@ public sealed class TileLoader : MonoBehaviour
             $"heightmapSamples={batchState.VegetationHeightmapSampleCount}, raycastSamples={batchState.VegetationRaycastSampleCount}, " +
             $"centerReadyMs={batchState.VegetationCenterReadyMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"fullSettledMs={batchState.VegetationFullSettledMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
-            $"missingPrefabs={batchState.VegetationMissingPrefabCount}.",
+            $"missingPrefabs={batchState.VegetationMissingPrefabCount}, " +
+            $"queueBuckets=[{FormatBucketSummary(batchState.VegetationQueuedPlacementsByBucket, batchState.VegetationQueuedWorkItemsByBucket, 6)}].",
             this);
 
         if (batchState.VegetationTileStats.Count > 0)
@@ -1469,7 +1475,7 @@ public sealed class TileLoader : MonoBehaviour
                         string settledOrInterruptedMs = stats.Status == VegetationTileStreamingStatus.Interrupted
                             ? stats.InterruptedMilliseconds.ToString("F1", CultureInfo.InvariantCulture)
                             : stats.TileReadyMilliseconds.ToString("F1", CultureInfo.InvariantCulture);
-                        return $"tile({pair.Key.x},{pair.Key.y})[{(stats.IsCenterTile ? "center" : "outer")}]: status={stats.Status}, kept={stats.KeptCount}/{stats.GeneratedCount}, skipped={stats.SkippedCount}, queuePrepCpuMs={stats.QueuePrepCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, placementCpuMs={stats.PlacementCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, placementWallMs={stats.PlacementWallMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, firstVisibleWallMs={stats.FirstVisibleMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, settledWallMs={settledOrInterruptedMs}, heightmapSamples={stats.HeightmapSampleCount}, raycastSamples={stats.RaycastSampleCount}, cats=[{categories}]";
+                        return $"tile({pair.Key.x},{pair.Key.y})[{(stats.IsCenterTile ? "center" : "outer")}]: status={stats.Status}, kept={stats.KeptCount}/{stats.GeneratedCount}, skipped={stats.SkippedCount}, queuedPlacements={stats.QueuedPlacementCount}, workItems={stats.QueuedWorkItemCount}, instanced={stats.InstancedPlacementCount}, legacy={stats.LegacyPlacementCount}, exactConform={stats.ExactTerrainConformPlacementCount}, approx={stats.ApproximatePlacementCount}, deferredFinalizes={stats.DeferredRendererFinalizeCount}, rendererFinalizes={stats.RendererFinalizeCount}, queuePrepCpuMs={stats.QueuePrepCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, placementCpuMs={stats.PlacementCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, prefabResolveMs={stats.PrefabResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, prototypeResolveMs={stats.PrototypeResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, positionBuildMs={stats.PositionBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, normalBuildMs={stats.NormalBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, rendererFinalizeMs={stats.RendererFinalizeMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, placementWallMs={stats.PlacementWallMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, firstVisibleWallMs={stats.FirstVisibleMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, settledWallMs={settledOrInterruptedMs}, heightmapSamples={stats.HeightmapSampleCount}, raycastSamples={stats.RaycastSampleCount}, buckets=[{FormatBucketSummary(stats.QueuedPlacementsByBucket, stats.QueuedWorkItemsByBucket, 4)}], cats=[{categories}]";
                     }));
             Debug.Log($"TileLoader vegetation tile stats: {tileSummary}", this);
         }
@@ -1500,6 +1506,53 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         target[key] = 1;
+    }
+
+    private static void AddCount(IDictionary<string, int> target, string key, int amount)
+    {
+        if (string.IsNullOrWhiteSpace(key) || amount == 0)
+        {
+            return;
+        }
+
+        if (target.TryGetValue(key, out int existing))
+        {
+            target[key] = existing + amount;
+            return;
+        }
+
+        target[key] = amount;
+    }
+
+    private static string FormatBucketSummary(
+        IDictionary<string, int> placementCountsByBucket,
+        IDictionary<string, int>? workItemCountsByBucket = null,
+        int maxBuckets = 5)
+    {
+        if (placementCountsByBucket.Count == 0)
+        {
+            return "none";
+        }
+
+        IEnumerable<string> orderedBucketKeys = placementCountsByBucket
+            .OrderByDescending(entry => entry.Value)
+            .Take(Math.Max(1, maxBuckets))
+            .Select(entry => entry.Key);
+        return string.Join(
+            ", ",
+            orderedBucketKeys.Select(bucketKey =>
+            {
+                int placementCount = placementCountsByBucket.TryGetValue(bucketKey, out int placementValue)
+                    ? placementValue
+                    : 0;
+                int workItemCount = workItemCountsByBucket != null &&
+                                    workItemCountsByBucket.TryGetValue(bucketKey, out int workItemValue)
+                    ? workItemValue
+                    : 0;
+                return workItemCountsByBucket == null
+                    ? $"{bucketKey}={placementCount}"
+                    : $"{bucketKey}={placementCount}p/{workItemCount}w";
+            }));
     }
 
     private static string FormatVegetationTileCategorySummary(VegetationTileStreamingStats stats, int maxCategories = 5)
@@ -1563,11 +1616,17 @@ public sealed class TileLoader : MonoBehaviour
             $"TileLoader tile ({tileCoordinate.x},{tileCoordinate.y}) vegetation fully settled: " +
             $"queuePrepCpuMs={tileStats.QueuePrepCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"placementCpuMs={tileStats.PlacementCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"prefabResolveMs={tileStats.PrefabResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"prototypeResolveMs={tileStats.PrototypeResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"positionBuildMs={tileStats.PositionBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"normalBuildMs={tileStats.NormalBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"rendererFinalizeMs={tileStats.RendererFinalizeMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"placementWallMs={tileStats.PlacementWallMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"settledWallMs={tileStats.TileReadyMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"kept={tileStats.KeptCount}/{tileStats.GeneratedCount}, skipped={tileStats.SkippedCount}, " +
+            $"queuedPlacements={tileStats.QueuedPlacementCount}, workItems={tileStats.QueuedWorkItemCount}, instanced={tileStats.InstancedPlacementCount}, legacy={tileStats.LegacyPlacementCount}, missingPrefabs={tileStats.MissingPrefabCount}, exactConform={tileStats.ExactTerrainConformPlacementCount}, approx={tileStats.ApproximatePlacementCount}, deferredFinalizes={tileStats.DeferredRendererFinalizeCount}, rendererFinalizes={tileStats.RendererFinalizeCount}, " +
             $"heightmapSamples={tileStats.HeightmapSampleCount}, raycastSamples={tileStats.RaycastSampleCount}, " +
-            $"{FormatFirstVisibleFragment(tileStats)}cats=[{FormatVegetationTileCategorySummary(tileStats, 6)}].",
+            $"{FormatFirstVisibleFragment(tileStats)}buckets=[{FormatBucketSummary(tileStats.QueuedPlacementsByBucket, tileStats.QueuedWorkItemsByBucket, 5)}], cats=[{FormatVegetationTileCategorySummary(tileStats, 6)}].",
             this);
     }
 
@@ -1583,11 +1642,75 @@ public sealed class TileLoader : MonoBehaviour
             $"TileLoader tile ({tileCoordinate.x},{tileCoordinate.y}) vegetation interrupted before settle: " +
             $"queuePrepCpuMs={tileStats.QueuePrepCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"placementCpuMs={tileStats.PlacementCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"prefabResolveMs={tileStats.PrefabResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"prototypeResolveMs={tileStats.PrototypeResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"positionBuildMs={tileStats.PositionBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"normalBuildMs={tileStats.NormalBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"rendererFinalizeMs={tileStats.RendererFinalizeMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"placementWallMs={tileStats.PlacementWallMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"interruptedWallMs={tileStats.InterruptedMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"kept={tileStats.KeptCount}/{tileStats.GeneratedCount}, skipped={tileStats.SkippedCount}, " +
+            $"queuedPlacements={tileStats.QueuedPlacementCount}, workItems={tileStats.QueuedWorkItemCount}, instanced={tileStats.InstancedPlacementCount}, legacy={tileStats.LegacyPlacementCount}, missingPrefabs={tileStats.MissingPrefabCount}, exactConform={tileStats.ExactTerrainConformPlacementCount}, approx={tileStats.ApproximatePlacementCount}, deferredFinalizes={tileStats.DeferredRendererFinalizeCount}, rendererFinalizes={tileStats.RendererFinalizeCount}, " +
             $"heightmapSamples={tileStats.HeightmapSampleCount}, raycastSamples={tileStats.RaycastSampleCount}, " +
-            $"{FormatFirstVisibleFragment(tileStats)}cats=[{FormatVegetationTileCategorySummary(tileStats, 6)}].",
+            $"{FormatFirstVisibleFragment(tileStats)}buckets=[{FormatBucketSummary(tileStats.QueuedPlacementsByBucket, tileStats.QueuedWorkItemsByBucket, 5)}], cats=[{FormatVegetationTileCategorySummary(tileStats, 6)}].",
+            this);
+    }
+
+    private void TryLogVegetationWorkQueueSummary(
+        GeneratedTerrainBatchState batchState,
+        IReadOnlyList<VegetationWorkItem> workItems)
+    {
+        if (!logGenerationPhaseTimings || !logVegetationPlacementWorkItems)
+        {
+            return;
+        }
+
+        int centerWorkItems = workItems.Count(item => item.IsCenterTile);
+        int outerWorkItems = workItems.Count - centerWorkItems;
+        int totalQueuedPlacements = workItems.Sum(item => item.Placements.Count);
+        Debug.Log(
+            $"TileLoader vegetation work queue: workItems={workItems.Count}, queuedPlacements={totalQueuedPlacements}, centerWorkItems={centerWorkItems}, outerWorkItems={outerWorkItems}, buckets=[{FormatBucketSummary(batchState.VegetationQueuedPlacementsByBucket, batchState.VegetationQueuedWorkItemsByBucket, 8)}].",
+            this);
+
+        string tileQueueSummary = string.Join(
+            "; ",
+            batchState.VegetationTileStats
+                .OrderBy(pair => pair.Key.y)
+                .ThenBy(pair => pair.Key.x)
+                .Where(pair => pair.Value.QueuedWorkItemCount > 0)
+                .Select(pair =>
+                {
+                    VegetationTileStreamingStats stats = pair.Value;
+                    return $"tile({pair.Key.x},{pair.Key.y})[{(stats.IsCenterTile ? "center" : "outer")}]: queuedPlacements={stats.QueuedPlacementCount}, workItems={stats.QueuedWorkItemCount}, buckets=[{FormatBucketSummary(stats.QueuedPlacementsByBucket, stats.QueuedWorkItemsByBucket, 4)}]";
+                }));
+        if (!string.IsNullOrWhiteSpace(tileQueueSummary))
+        {
+            Debug.Log($"TileLoader vegetation tile queue: {tileQueueSummary}", this);
+        }
+    }
+
+    private void TryLogVegetationWorkItemCompletion(
+        VegetationWorkItem workItem,
+        VegetationTileStreamingStats? tileStats,
+        int completedWorkItemCount,
+        int visibleInstancedPlacementCount,
+        bool rendererFinalizeDeferred,
+        bool rendererReady,
+        double rendererPrototypeInitMilliseconds)
+    {
+        if (!logGenerationPhaseTimings || !logVegetationPlacementWorkItems)
+        {
+            return;
+        }
+
+        Vector2Int tileCoordinate = GetTileCoordinate(workItem.BuildState.Request);
+        int totalQueuedWorkItems = tileStats != null ? tileStats.QueuedWorkItemCount : 0;
+        Debug.Log(
+            $"TileLoader vegetation chunk tile ({tileCoordinate.x},{tileCoordinate.y})[{(workItem.IsCenterTile ? "center" : "outer")}]: " +
+            $"bucket={workItem.PriorityBucket}, chunk={workItem.ChunkIndexWithinBucket + 1}/{workItem.ChunkCountWithinBucket}, chunkPlacements={workItem.Placements.Count}, completedChunks={completedWorkItemCount}/{totalQueuedWorkItems}, " +
+            $"instancedAdded={workItem.InstancedPlacementCount}, legacyAdded={workItem.LegacyPlacementCount}, visibleInstancedNow={visibleInstancedPlacementCount}, missingPrefabs={workItem.MissingPrefabCount}, forcedInstancingOnly={workItem.ForcedInstancingOnlyCount}, exactConform={workItem.ExactTerrainConformPlacementCount}, approx={workItem.ApproximatePlacementCount}, newPrototypes={workItem.NewPrototypeCount}, " +
+            $"prefabResolveMs={workItem.PrefabResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, prototypeResolveMs={workItem.PrototypeResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, positionBuildMs={workItem.PositionBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, normalBuildMs={workItem.NormalBuildMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, rendererFinalizeMs={workItem.RendererFinalizeMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"rendererDeferred={rendererFinalizeDeferred}, rendererReady={rendererReady}, rendererPrototypeInitMs={rendererPrototypeInitMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, cumulativeInstanced={workItem.BuildState.Placements.Count}, cumulativePrototypes={workItem.BuildState.Prototypes.Count}.",
             this);
     }
 
@@ -4163,6 +4286,9 @@ public sealed class TileLoader : MonoBehaviour
                 }
 
                 int chunkSize = ResolveVegetationWorkItemChunkSize(bucket);
+                int chunkCountForBucket = (bucketPlacements.Count + chunkSize - 1) / chunkSize;
+                string bucketKey = bucket.ToString();
+                int chunkOrdinalWithinBucket = 0;
                 for (int chunkStart = 0; chunkStart < bucketPlacements.Count; chunkStart += chunkSize)
                 {
                     int chunkCount = Math.Min(chunkSize, bucketPlacements.Count - chunkStart);
@@ -4172,12 +4298,19 @@ public sealed class TileLoader : MonoBehaviour
                         chunkPlacements.Add(bucketPlacements[chunkStart + chunkIndex]);
                     }
 
-                    batchState.VegetationTileStats[tileCoordinate].RecordQueuedWorkItem();
+                    batchState.VegetationTileStats[tileCoordinate].RecordQueuedWorkItem(chunkPlacements.Count, bucket);
+                    batchState.VegetationQueuedWorkItemCount++;
+                    batchState.VegetationQueuedPlacementCount += chunkPlacements.Count;
+                    IncrementCount(batchState.VegetationQueuedWorkItemsByBucket, bucketKey);
+                    AddCount(batchState.VegetationQueuedPlacementsByBucket, bucketKey, chunkPlacements.Count);
                     bucketWorkItems.Add(new VegetationWorkItem(
                         buildState,
                         bucket,
                         chunkPlacements,
-                        preparedPlacements[0].IsCenterTile));
+                        preparedPlacements[0].IsCenterTile,
+                        chunkOrdinalWithinBucket,
+                        chunkCountForBucket));
+                    chunkOrdinalWithinBucket++;
                 }
             }
         }
@@ -4223,6 +4356,17 @@ public sealed class TileLoader : MonoBehaviour
             }
         }
 
+        var finalizedBuildStates = new HashSet<HybridVegetationBuildState>();
+        for (int i = orderedWorkItems.Count - 1; i >= 0; i--)
+        {
+            VegetationWorkItem workItem = orderedWorkItems[i];
+            if (finalizedBuildStates.Add(workItem.BuildState))
+            {
+                workItem.IsFinalChunkForTile = true;
+            }
+        }
+
+        TryLogVegetationWorkQueueSummary(batchState, orderedWorkItems);
         return orderedWorkItems;
     }
 
@@ -4419,7 +4563,7 @@ public sealed class TileLoader : MonoBehaviour
 
         PreparedVegetationPlacement preparedPlacement = workItem.Placements[workItem.NextPlacementIndex];
         workItem.NextPlacementIndex++;
-        bool placementBecameVisible = ProcessPreparedHybridVegetationPlacement(workItem.BuildState, preparedPlacement);
+        bool placementBecameVisible = ProcessPreparedHybridVegetationPlacement(workItem, preparedPlacement);
         if (placementBecameVisible && workItem.BuildState.BatchState != null)
         {
             Vector2Int tileCoordinate = GetTileCoordinate(workItem.BuildState.Request);
@@ -4434,9 +4578,10 @@ public sealed class TileLoader : MonoBehaviour
     }
 
     private bool ProcessPreparedHybridVegetationPlacement(
-        HybridVegetationBuildState buildState,
+        VegetationWorkItem workItem,
         PreparedVegetationPlacement preparedPlacement)
     {
+        HybridVegetationBuildState buildState = workItem.BuildState;
         TileObjectPlacement placement = preparedPlacement.Placement;
         VegetationTileStreamingStats? tileStats = null;
         if (buildState.BatchState != null)
@@ -4454,9 +4599,12 @@ public sealed class TileLoader : MonoBehaviour
             buildState.BatchState,
             tileStats,
             phaseStopwatch.Elapsed.TotalMilliseconds,
-            VegetationPlacementPhase.PrefabResolve);
+            VegetationPlacementPhase.PrefabResolve,
+            workItem);
         if (prefab == null)
         {
+            workItem.RecordMissingPrefab();
+            tileStats?.RecordMissingPrefab();
             return false;
         }
 
@@ -4485,11 +4633,13 @@ public sealed class TileLoader : MonoBehaviour
             buildState.BatchState,
             tileStats,
             phaseStopwatch.Elapsed.TotalMilliseconds,
-            VegetationPlacementPhase.PrototypeResolve);
+            VegetationPlacementPhase.PrototypeResolve,
+            workItem);
         if (prototype != null &&
             TryBuildInstancedPlacement(
                 buildState,
                 tileStats,
+                workItem,
                 preparedPlacement,
                 prototype,
                 out TileLoaderInstancedVegetationPlacement instancedPlacement))
@@ -4500,6 +4650,7 @@ public sealed class TileLoader : MonoBehaviour
                 prototypeIndex = buildState.Prototypes.Count;
                 buildState.PrototypeIndices[prototype.Key] = prototypeIndex;
                 buildState.Prototypes.Add(prototype);
+                workItem.NewPrototypeCount++;
             }
 
             buildState.Placements.Add(new TileLoaderInstancedVegetationPlacement(
@@ -4512,11 +4663,16 @@ public sealed class TileLoader : MonoBehaviour
                 instancedPlacement.SurfaceSampleLocalZ,
                 instancedPlacement.SurfaceVerticalOffset,
                 instancedPlacement.SurfaceNormalOffset));
-            if (preparedPlacement.ForceInstancingOnly && buildState.BatchState != null)
+            workItem.RecordInstancedPlacement(preparedPlacement.ForceInstancingOnly);
+            tileStats?.RecordInstancedPlacement(preparedPlacement.PriorityBucket, preparedPlacement.ForceInstancingOnly);
+            if (buildState.BatchState != null)
             {
-                buildState.BatchState.VegetationForcedInstancingOnlyCount++;
+                buildState.BatchState.VegetationInstancedPlacementCount++;
+                if (preparedPlacement.ForceInstancingOnly)
+                {
+                    buildState.BatchState.VegetationForcedInstancingOnlyCount++;
+                }
             }
-
             return false;
         }
 
@@ -4526,13 +4682,25 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         buildState.VegetationContainer ??= CreateVegetationContainer(buildState.Terrain.transform);
-        return InstantiatePreparedLegacyPlacement(
+        bool instantiated = InstantiatePreparedLegacyPlacement(
             buildState,
             tileStats,
+            workItem,
             preparedPlacement,
             prefab,
             isTreeObject,
             buildState.VegetationContainer);
+        if (instantiated)
+        {
+            workItem.RecordLegacyPlacement();
+            tileStats?.RecordLegacyPlacement(preparedPlacement.PriorityBucket);
+            if (buildState.BatchState != null)
+            {
+                buildState.BatchState.VegetationLegacyPlacementCount++;
+            }
+        }
+
+        return instantiated;
     }
 
     private void FinalizeVegetationWorkItem(VegetationWorkItem workItem, Stopwatch totalStopwatch)
@@ -4546,15 +4714,39 @@ public sealed class TileLoader : MonoBehaviour
                 workItem.IsCenterTile);
         }
 
-        double rendererFinalizeMilliseconds = FinalizeHybridVegetationBuild(workItem.BuildState);
+        int previousFinalizedPlacementCount = workItem.BuildState.LastFinalizedPlacementCount;
+        bool shouldFinalizeRenderer =
+            workItem.IsFinalChunkForTile ||
+            workItem.BuildState.Placements.Count <= 512;
+        double rendererFinalizeMilliseconds = shouldFinalizeRenderer
+            ? FinalizeHybridVegetationBuild(workItem.BuildState)
+            : 0d;
         RecordPlacementPhaseTiming(
             workItem.BuildState.BatchState,
             tileStats,
             rendererFinalizeMilliseconds,
-            VegetationPlacementPhase.RendererFinalize);
+            VegetationPlacementPhase.RendererFinalize,
+            workItem);
         if (rendererFinalizeMilliseconds > 0d)
         {
             tileStats?.RecordVisible(totalStopwatch.Elapsed.TotalMilliseconds);
+        }
+        else if (workItem.InstancedPlacementCount > 0)
+        {
+            tileStats?.RecordDeferredRendererFinalize();
+            if (workItem.BuildState.BatchState != null)
+            {
+                workItem.BuildState.BatchState.VegetationDeferredRendererFinalizeCount++;
+            }
+        }
+
+        if (rendererFinalizeMilliseconds > 0d)
+        {
+            tileStats?.RecordRendererFinalize();
+            if (workItem.BuildState.BatchState != null)
+            {
+                workItem.BuildState.BatchState.VegetationRendererFinalizeCount++;
+            }
         }
 
         if (workItem.BuildState.BatchState != null)
@@ -4564,7 +4756,22 @@ public sealed class TileLoader : MonoBehaviour
                 workItem.BuildState.BatchState,
                 tileCoordinate,
                 workItem.IsCenterTile);
-            if (completedTileStats.RecordCompletedWorkItem(totalStopwatch.Elapsed.TotalMilliseconds))
+            int completedWorkItemCount = completedTileStats.RecordCompletedWorkItem(totalStopwatch.Elapsed.TotalMilliseconds);
+            int visibleInstancedPlacementCount = rendererFinalizeMilliseconds > 0d
+                ? Math.Max(0, workItem.BuildState.LastFinalizedPlacementCount - previousFinalizedPlacementCount)
+                : 0;
+            TileLoaderInstancedVegetationRenderer? renderer = workItem.BuildState.VegetationContainer != null
+                ? workItem.BuildState.VegetationContainer.GetComponent<TileLoaderInstancedVegetationRenderer>()
+                : null;
+            TryLogVegetationWorkItemCompletion(
+                workItem,
+                completedTileStats,
+                completedWorkItemCount,
+                visibleInstancedPlacementCount,
+                !shouldFinalizeRenderer && workItem.InstancedPlacementCount > 0,
+                renderer == null || renderer.IsPrototypeRuntimeReady,
+                renderer?.LastPrototypeInitializationMilliseconds ?? 0d);
+            if (completedWorkItemCount >= completedTileStats.QueuedWorkItemCount)
             {
                 TryLogSettledVegetationTile(tileCoordinate, completedTileStats);
             }
@@ -4840,7 +5047,8 @@ public sealed class TileLoader : MonoBehaviour
         GeneratedTerrainBatchState? batchState,
         VegetationTileStreamingStats? tileStats,
         double elapsedMilliseconds,
-        VegetationPlacementPhase placementPhase)
+        VegetationPlacementPhase placementPhase,
+        VegetationWorkItem? workItem = null)
     {
         if (elapsedMilliseconds <= 0d)
         {
@@ -4848,6 +5056,8 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         tileStats?.RecordPlacementCpu(elapsedMilliseconds);
+        tileStats?.RecordPlacementPhase(elapsedMilliseconds, placementPhase);
+        workItem?.RecordPlacementPhase(elapsedMilliseconds, placementPhase);
         if (batchState == null)
         {
             return;
@@ -5178,6 +5388,7 @@ public sealed class TileLoader : MonoBehaviour
     private bool TryBuildInstancedPlacement(
         HybridVegetationBuildState buildState,
         VegetationTileStreamingStats? tileStats,
+        VegetationWorkItem? workItem,
         PreparedVegetationPlacement preparedPlacement,
         TileLoaderInstancedVegetationPrototype prototype,
         out TileLoaderInstancedVegetationPlacement instancedPlacement)
@@ -5191,10 +5402,28 @@ public sealed class TileLoader : MonoBehaviour
         CreatePreparedPlacementTransform(
             buildState,
             tileStats,
+            workItem,
             preparedPlacement,
             prototype.IsTree,
             out Vector3 localPosition,
-            out Quaternion localRotation);
+            out Quaternion localRotation,
+            out bool usedExactTerrainConform);
+        if (workItem != null)
+        {
+            workItem.RecordPlacementTransformMode(usedExactTerrainConform);
+        }
+        tileStats?.RecordPlacementTransformMode(usedExactTerrainConform);
+        if (buildState.BatchState != null)
+        {
+            if (usedExactTerrainConform)
+            {
+                buildState.BatchState.VegetationExactTerrainConformPlacementCount++;
+            }
+            else
+            {
+                buildState.BatchState.VegetationApproximatePlacementCount++;
+            }
+        }
         instancedPlacement = new TileLoaderInstancedVegetationPlacement(
             0,
             localPosition,
@@ -5211,6 +5440,7 @@ public sealed class TileLoader : MonoBehaviour
     private bool InstantiatePreparedLegacyPlacement(
         HybridVegetationBuildState buildState,
         VegetationTileStreamingStats? tileStats,
+        VegetationWorkItem? workItem,
         PreparedVegetationPlacement preparedPlacement,
         GameObject prefab,
         bool isTreeObject,
@@ -5225,10 +5455,28 @@ public sealed class TileLoader : MonoBehaviour
         CreatePreparedPlacementTransform(
             buildState,
             tileStats,
+            workItem,
             preparedPlacement,
             isTreeObject,
             out Vector3 localPosition,
-            out Quaternion localRotation);
+            out Quaternion localRotation,
+            out bool usedExactTerrainConform);
+        if (workItem != null)
+        {
+            workItem.RecordPlacementTransformMode(usedExactTerrainConform);
+        }
+        tileStats?.RecordPlacementTransformMode(usedExactTerrainConform);
+        if (buildState.BatchState != null)
+        {
+            if (usedExactTerrainConform)
+            {
+                buildState.BatchState.VegetationExactTerrainConformPlacementCount++;
+            }
+            else
+            {
+                buildState.BatchState.VegetationApproximatePlacementCount++;
+            }
+        }
         instance.name = prefab.name;
         instance.transform.SetParent(vegetationContainer, false);
         instance.transform.localScale = Vector3.one;
@@ -5247,13 +5495,16 @@ public sealed class TileLoader : MonoBehaviour
     private void CreatePreparedPlacementTransform(
         HybridVegetationBuildState buildState,
         VegetationTileStreamingStats? tileStats,
+        VegetationWorkItem? workItem,
         PreparedVegetationPlacement preparedPlacement,
         bool isTreeObject,
         out Vector3 localPosition,
-        out Quaternion localRotation)
+        out Quaternion localRotation,
+        out bool usedExactTerrainConform)
     {
         localPosition = preparedPlacement.Geometry.LocalPosition;
         Vector3 localNormal = preparedPlacement.Geometry.LocalNormal;
+        usedExactTerrainConform = false;
 
         var positionStopwatch = Stopwatch.StartNew();
         if (!isTreeObject &&
@@ -5268,6 +5519,7 @@ public sealed class TileLoader : MonoBehaviour
         {
             localPosition = exactLocalSurfacePoint;
             localNormal = exactLocalSurfaceNormal;
+            usedExactTerrainConform = true;
             RecordVegetationSampleCounts(buildState.BatchState, tileStats, 0, 1);
         }
 
@@ -5276,7 +5528,8 @@ public sealed class TileLoader : MonoBehaviour
             buildState.BatchState,
             tileStats,
             positionStopwatch.Elapsed.TotalMilliseconds,
-            VegetationPlacementPhase.PositionBuild);
+            VegetationPlacementPhase.PositionBuild,
+            workItem);
         if (isTreeObject)
         {
             localRotation = Quaternion.identity;
@@ -5291,7 +5544,8 @@ public sealed class TileLoader : MonoBehaviour
             buildState.BatchState,
             tileStats,
             normalStopwatch.Elapsed.TotalMilliseconds,
-            VegetationPlacementPhase.NormalBuild);
+            VegetationPlacementPhase.NormalBuild,
+            workItem);
     }
 
     private void InstantiateLegacyPlacement(
@@ -7391,20 +7645,91 @@ public sealed class TileLoader : MonoBehaviour
             HybridVegetationBuildState buildState,
             VegetationPriorityBucket priorityBucket,
             IReadOnlyList<PreparedVegetationPlacement> placements,
-            bool isCenterTile)
+            bool isCenterTile,
+            int chunkIndexWithinBucket,
+            int chunkCountWithinBucket)
         {
             BuildState = buildState;
             PriorityBucket = priorityBucket;
             Placements = placements;
             IsCenterTile = isCenterTile;
+            ChunkIndexWithinBucket = chunkIndexWithinBucket;
+            ChunkCountWithinBucket = Math.Max(1, chunkCountWithinBucket);
         }
 
         public HybridVegetationBuildState BuildState { get; }
         public VegetationPriorityBucket PriorityBucket { get; }
         public IReadOnlyList<PreparedVegetationPlacement> Placements { get; }
         public bool IsCenterTile { get; }
+        public int ChunkIndexWithinBucket { get; }
+        public int ChunkCountWithinBucket { get; }
         public bool MarksCenterTileReady { get; set; }
+        public bool IsFinalChunkForTile { get; set; }
         public int NextPlacementIndex { get; set; }
+        public int InstancedPlacementCount { get; private set; }
+        public int LegacyPlacementCount { get; private set; }
+        public int MissingPrefabCount { get; private set; }
+        public int ForcedInstancingOnlyCount { get; private set; }
+        public int ExactTerrainConformPlacementCount { get; private set; }
+        public int ApproximatePlacementCount { get; private set; }
+        public int NewPrototypeCount { get; set; }
+        public double PrefabResolveMilliseconds { get; private set; }
+        public double PrototypeResolveMilliseconds { get; private set; }
+        public double PositionBuildMilliseconds { get; private set; }
+        public double NormalBuildMilliseconds { get; private set; }
+        public double RendererFinalizeMilliseconds { get; set; }
+
+        public void RecordInstancedPlacement(bool forcedInstancingOnly)
+        {
+            InstancedPlacementCount++;
+            if (forcedInstancingOnly)
+            {
+                ForcedInstancingOnlyCount++;
+            }
+        }
+
+        public void RecordLegacyPlacement()
+        {
+            LegacyPlacementCount++;
+        }
+
+        public void RecordMissingPrefab()
+        {
+            MissingPrefabCount++;
+        }
+
+        public void RecordPlacementTransformMode(bool usedExactTerrainConform)
+        {
+            if (usedExactTerrainConform)
+            {
+                ExactTerrainConformPlacementCount++;
+                return;
+            }
+
+            ApproximatePlacementCount++;
+        }
+
+        public void RecordPlacementPhase(double elapsedMilliseconds, VegetationPlacementPhase placementPhase)
+        {
+            switch (placementPhase)
+            {
+                case VegetationPlacementPhase.PrefabResolve:
+                    PrefabResolveMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.PrototypeResolve:
+                    PrototypeResolveMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.PositionBuild:
+                    PositionBuildMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.NormalBuild:
+                    NormalBuildMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.RendererFinalize:
+                    RendererFinalizeMilliseconds += elapsedMilliseconds;
+                    break;
+            }
+        }
     }
 
     private readonly struct PreparedPlacementGeometry
@@ -7494,6 +7819,8 @@ public sealed class TileLoader : MonoBehaviour
             GeneratedByCategory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             KeptByCategory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             SkippedByCategory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            QueuedPlacementsByBucket = new Dictionary<string, int>(StringComparer.Ordinal);
+            QueuedWorkItemsByBucket = new Dictionary<string, int>(StringComparer.Ordinal);
         }
 
         public Vector2Int TileCoordinate { get; }
@@ -7501,9 +7828,20 @@ public sealed class TileLoader : MonoBehaviour
         public Dictionary<string, int> GeneratedByCategory { get; }
         public Dictionary<string, int> KeptByCategory { get; }
         public Dictionary<string, int> SkippedByCategory { get; }
+        public Dictionary<string, int> QueuedPlacementsByBucket { get; }
+        public Dictionary<string, int> QueuedWorkItemsByBucket { get; }
         public int GeneratedCount { get; private set; }
         public int KeptCount { get; private set; }
         public int SkippedCount { get; private set; }
+        public int QueuedPlacementCount { get; private set; }
+        public int InstancedPlacementCount { get; private set; }
+        public int LegacyPlacementCount { get; private set; }
+        public int MissingPrefabCount { get; private set; }
+        public int ForcedInstancingOnlyCount { get; private set; }
+        public int ExactTerrainConformPlacementCount { get; private set; }
+        public int ApproximatePlacementCount { get; private set; }
+        public int DeferredRendererFinalizeCount { get; private set; }
+        public int RendererFinalizeCount { get; private set; }
         public int VisiblePlacementCount { get; private set; }
         public int QueuedWorkItemCount { get; private set; }
         public int CompletedWorkItemCount { get; private set; }
@@ -7514,6 +7852,11 @@ public sealed class TileLoader : MonoBehaviour
         public double PlacementCpuMilliseconds { get; private set; }
         public double PlacementWallMilliseconds { get; private set; }
         public double QueuePrepCompletedWallMilliseconds { get; private set; }
+        public double PrefabResolveMilliseconds { get; private set; }
+        public double PrototypeResolveMilliseconds { get; private set; }
+        public double PositionBuildMilliseconds { get; private set; }
+        public double NormalBuildMilliseconds { get; private set; }
+        public double RendererFinalizeMilliseconds { get; private set; }
         public int HeightmapSampleCount { get; private set; }
         public int RaycastSampleCount { get; private set; }
         public bool HasLoggedReady { get; set; }
@@ -7551,9 +7894,13 @@ public sealed class TileLoader : MonoBehaviour
             }
         }
 
-        public void RecordQueuedWorkItem()
+        public void RecordQueuedWorkItem(int placementCount, VegetationPriorityBucket priorityBucket)
         {
             QueuedWorkItemCount++;
+            QueuedPlacementCount += Math.Max(0, placementCount);
+            string bucketKey = priorityBucket.ToString();
+            IncrementCount(QueuedWorkItemsByBucket, bucketKey);
+            AddCount(QueuedPlacementsByBucket, bucketKey, placementCount);
         }
 
         public void RecordQueuePrep(double cpuMilliseconds, double queuePrepCompletedWallMilliseconds)
@@ -7567,6 +7914,73 @@ public sealed class TileLoader : MonoBehaviour
             PlacementCpuMilliseconds += cpuMilliseconds;
         }
 
+        public void RecordPlacementPhase(double elapsedMilliseconds, VegetationPlacementPhase placementPhase)
+        {
+            switch (placementPhase)
+            {
+                case VegetationPlacementPhase.PrefabResolve:
+                    PrefabResolveMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.PrototypeResolve:
+                    PrototypeResolveMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.PositionBuild:
+                    PositionBuildMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.NormalBuild:
+                    NormalBuildMilliseconds += elapsedMilliseconds;
+                    break;
+                case VegetationPlacementPhase.RendererFinalize:
+                    RendererFinalizeMilliseconds += elapsedMilliseconds;
+                    break;
+            }
+        }
+
+        public void RecordInstancedPlacement(VegetationPriorityBucket priorityBucket, bool forcedInstancingOnly)
+        {
+            InstancedPlacementCount++;
+            if (forcedInstancingOnly)
+            {
+                ForcedInstancingOnlyCount++;
+            }
+        }
+
+        public void RecordLegacyPlacement(VegetationPriorityBucket priorityBucket)
+        {
+            LegacyPlacementCount++;
+        }
+
+        public void RecordMissingPrefab()
+        {
+            MissingPrefabCount++;
+        }
+
+        public void RecordForcedInstancingOnly()
+        {
+            ForcedInstancingOnlyCount++;
+        }
+
+        public void RecordPlacementTransformMode(bool usedExactTerrainConform)
+        {
+            if (usedExactTerrainConform)
+            {
+                ExactTerrainConformPlacementCount++;
+                return;
+            }
+
+            ApproximatePlacementCount++;
+        }
+
+        public void RecordDeferredRendererFinalize()
+        {
+            DeferredRendererFinalizeCount++;
+        }
+
+        public void RecordRendererFinalize()
+        {
+            RendererFinalizeCount++;
+        }
+
         public void RecordHeightmapSamples(int sampleCount)
         {
             HeightmapSampleCount += Math.Max(0, sampleCount);
@@ -7577,16 +7991,16 @@ public sealed class TileLoader : MonoBehaviour
             RaycastSampleCount += Math.Max(0, sampleCount);
         }
 
-        public bool RecordCompletedWorkItem(double elapsedMilliseconds)
+        public int RecordCompletedWorkItem(double elapsedMilliseconds)
         {
             CompletedWorkItemCount++;
             if (Status == VegetationTileStreamingStatus.Settled || CompletedWorkItemCount < QueuedWorkItemCount)
             {
-                return false;
+                return CompletedWorkItemCount;
             }
 
             MarkSettled(elapsedMilliseconds);
-            return true;
+            return CompletedWorkItemCount;
         }
 
         public void MarkSettled(double settledElapsedMilliseconds)
@@ -7669,6 +8083,8 @@ public sealed class TileLoader : MonoBehaviour
             PhaseTimingsMilliseconds = new Dictionary<string, double>(StringComparer.Ordinal);
             VegetationTileStats = new Dictionary<Vector2Int, VegetationTileStreamingStats>();
             MissingPrefabCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            VegetationQueuedPlacementsByBucket = new Dictionary<string, int>(StringComparer.Ordinal);
+            VegetationQueuedWorkItemsByBucket = new Dictionary<string, int>(StringComparer.Ordinal);
         }
 
         public string CacheKey { get; }
@@ -7692,6 +8108,8 @@ public sealed class TileLoader : MonoBehaviour
         public Dictionary<string, double> PhaseTimingsMilliseconds { get; }
         public Dictionary<Vector2Int, VegetationTileStreamingStats> VegetationTileStats { get; }
         public Dictionary<string, int> MissingPrefabCountsByPath { get; }
+        public Dictionary<string, int> VegetationQueuedPlacementsByBucket { get; }
+        public Dictionary<string, int> VegetationQueuedWorkItemsByBucket { get; }
         public Vector3? VegetationStreamingTargetWorldPosition { get; set; }
         public int ReusedTerrainCount { get; set; }
         public int RemovedTerrainCount { get; set; }
@@ -7701,6 +8119,14 @@ public sealed class TileLoader : MonoBehaviour
         public int VegetationSkippedByPolicyCount { get; set; }
         public int VegetationSkippedByDistanceCount { get; set; }
         public int VegetationSkippedByCapCount { get; set; }
+        public int VegetationQueuedWorkItemCount { get; set; }
+        public int VegetationQueuedPlacementCount { get; set; }
+        public int VegetationInstancedPlacementCount { get; set; }
+        public int VegetationLegacyPlacementCount { get; set; }
+        public int VegetationExactTerrainConformPlacementCount { get; set; }
+        public int VegetationApproximatePlacementCount { get; set; }
+        public int VegetationDeferredRendererFinalizeCount { get; set; }
+        public int VegetationRendererFinalizeCount { get; set; }
         public int VegetationPrototypeCacheHitCount { get; set; }
         public int VegetationPrototypeCacheMissCount { get; set; }
         public int VegetationForcedInstancingOnlyCount { get; set; }
