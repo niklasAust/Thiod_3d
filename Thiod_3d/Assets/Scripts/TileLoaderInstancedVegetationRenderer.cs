@@ -1,7 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Collections;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
 using UnityEngine.Rendering;
+#if GRIFFIN
+using Pinwheel.Griffin;
+#endif
 
 #nullable enable
 
@@ -43,12 +48,14 @@ public sealed class TileLoaderInstancedVegetationPrototype
         GameObject prefab,
         bool isTree,
         bool supportsPromotion,
+        float maxRenderDistanceMeters,
         IReadOnlyList<TileLoaderInstancedVegetationRenderSource> renderSources)
     {
         Key = key ?? throw new ArgumentNullException(nameof(key));
         Prefab = prefab;
         IsTree = isTree;
         SupportsPromotion = supportsPromotion;
+        MaxRenderDistanceMeters = maxRenderDistanceMeters;
         RenderSources = renderSources ?? throw new ArgumentNullException(nameof(renderSources));
     }
 
@@ -56,7 +63,9 @@ public sealed class TileLoaderInstancedVegetationPrototype
     public GameObject Prefab { get; }
     public bool IsTree { get; }
     public bool SupportsPromotion { get; }
+    public float MaxRenderDistanceMeters { get; }
     public IReadOnlyList<TileLoaderInstancedVegetationRenderSource> RenderSources { get; }
+    public object? SharedRuntime { get; set; }
 }
 
 public readonly struct TileLoaderInstancedVegetationPlacement
@@ -65,18 +74,33 @@ public readonly struct TileLoaderInstancedVegetationPlacement
         int prototypeIndex,
         Vector3 localPosition,
         Quaternion localRotation,
-        Vector3 localScale)
+        Vector3 localScale,
+        bool conformToTerrainOnPromotion,
+        float surfaceSampleLocalX,
+        float surfaceSampleLocalZ,
+        float surfaceVerticalOffset,
+        float surfaceNormalOffset)
     {
         PrototypeIndex = prototypeIndex;
         LocalPosition = localPosition;
         LocalRotation = localRotation;
         LocalScale = localScale;
+        ConformToTerrainOnPromotion = conformToTerrainOnPromotion;
+        SurfaceSampleLocalX = surfaceSampleLocalX;
+        SurfaceSampleLocalZ = surfaceSampleLocalZ;
+        SurfaceVerticalOffset = surfaceVerticalOffset;
+        SurfaceNormalOffset = surfaceNormalOffset;
     }
 
     public int PrototypeIndex { get; }
     public Vector3 LocalPosition { get; }
     public Quaternion LocalRotation { get; }
     public Vector3 LocalScale { get; }
+    public bool ConformToTerrainOnPromotion { get; }
+    public float SurfaceSampleLocalX { get; }
+    public float SurfaceSampleLocalZ { get; }
+    public float SurfaceVerticalOffset { get; }
+    public float SurfaceNormalOffset { get; }
 }
 
 [DisallowMultipleComponent]
@@ -110,13 +134,20 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
     private bool _interactive;
     private float _nextInteractionUpdateTime;
     private Transform? _promotedContainer;
+    private Coroutine? _runtimeBuildCoroutine;
+    private float _prototypeInitBudgetMsPerFrame;
+
+    public bool IsPrototypeRuntimeReady { get; private set; }
+    public double LastPrototypeInitializationMilliseconds { get; private set; }
+    public double LastInitializationCpuMilliseconds { get; private set; }
 
     public void Initialize(
         IReadOnlyList<TileLoaderInstancedVegetationPrototype> prototypes,
         IReadOnlyList<TileLoaderInstancedVegetationPlacement> placements,
         bool interactive,
         float interactionRadiusMeters,
-        float interactionHysteresisMeters)
+        float interactionHysteresisMeters,
+        float prototypeInitBudgetMsPerFrame)
     {
         ReleaseRuntimeData();
 
@@ -137,9 +168,31 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         _interactive = interactive;
         _interactionRadiusMeters = Mathf.Max(0f, interactionRadiusMeters);
         _interactionHysteresisMeters = Mathf.Max(0f, interactionHysteresisMeters);
-        _prototypeRuntimes = BuildPrototypeRuntimes(_prototypes, _placements);
+        _prototypeInitBudgetMsPerFrame = Mathf.Max(0.1f, prototypeInitBudgetMsPerFrame);
         _nextInteractionUpdateTime = 0f;
+        LastPrototypeInitializationMilliseconds = 0d;
+        LastInitializationCpuMilliseconds = 0d;
+        IsPrototypeRuntimeReady = false;
+        var initializeStopwatch = Stopwatch.StartNew();
+
+        if (Application.isPlaying && _placements.Length > 512 && _prototypeInitBudgetMsPerFrame > 0f)
+        {
+            _prototypeRuntimes = new PrototypeRuntime[_prototypes.Length];
+            _runtimeBuildCoroutine = StartCoroutine(BuildPrototypeRuntimesOverMultipleFrames());
+            enabled = _prototypes.Length > 0;
+            initializeStopwatch.Stop();
+            LastInitializationCpuMilliseconds = initializeStopwatch.Elapsed.TotalMilliseconds;
+            return;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        _prototypeRuntimes = BuildPrototypeRuntimes(_prototypes, _placements);
+        stopwatch.Stop();
+        LastPrototypeInitializationMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
+        IsPrototypeRuntimeReady = true;
         enabled = _prototypeRuntimes.Length > 0;
+        initializeStopwatch.Stop();
+        LastInitializationCpuMilliseconds = initializeStopwatch.Elapsed.TotalMilliseconds;
     }
 
     private void OnEnable()
@@ -151,7 +204,6 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
     {
         RenderPipelineManager.beginCameraRendering -= HandleBeginCameraRendering;
         ReleasePromotedInstances();
-        DestroyRuntimeMaterials();
     }
 
     private void Update()
@@ -186,7 +238,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             }
 
             TileLoaderInstancedVegetationPrototype prototype = _prototypes[placement.PrototypeIndex];
-            if (!prototype.IsTree || !prototype.SupportsPromotion)
+            if (!prototype.SupportsPromotion)
             {
                 continue;
             }
@@ -226,6 +278,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         }
 
         Matrix4x4 containerMatrix = transform.localToWorldMatrix;
+        Vector3 cameraPosition = camera.transform.position;
         for (int prototypeIndex = 0; prototypeIndex < _prototypeRuntimes.Length; prototypeIndex++)
         {
             PrototypeRuntime prototypeRuntime = _prototypeRuntimes[prototypeIndex];
@@ -233,6 +286,10 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             {
                 continue;
             }
+
+            float maxRenderDistanceMeters = _prototypes[prototypeIndex].MaxRenderDistanceMeters;
+            bool limitByDistance = maxRenderDistanceMeters > 0f;
+            float maxRenderDistanceSq = maxRenderDistanceMeters * maxRenderDistanceMeters;
 
             IReadOnlyList<int> placementIndices = prototypeRuntime.PlacementIndices;
             for (int renderEntryIndex = 0; renderEntryIndex < prototypeRuntime.RenderEntries.Length; renderEntryIndex++)
@@ -258,6 +315,15 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
                     }
 
                     TileLoaderInstancedVegetationPlacement placement = _placements[placementIndex];
+                    if (limitByDistance)
+                    {
+                        Vector3 worldPosition = transform.TransformPoint(placement.LocalPosition);
+                        if ((worldPosition - cameraPosition).sqrMagnitude > maxRenderDistanceSq)
+                        {
+                            continue;
+                        }
+                    }
+
                     Matrix4x4 placementMatrix = Matrix4x4.TRS(
                         placement.LocalPosition,
                         placement.LocalRotation,
@@ -332,27 +398,97 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
                 continue;
             }
 
-            var renderEntries = new RenderEntryRuntime[prototype.RenderSources.Count];
-            for (int sourceIndex = 0; sourceIndex < prototype.RenderSources.Count; sourceIndex++)
-            {
-                TileLoaderInstancedVegetationRenderSource source = prototype.RenderSources[sourceIndex];
-                Material runtimeMaterial = CreateRuntimeInstancedMaterial(source.Material);
-                renderEntries[sourceIndex] = new RenderEntryRuntime(
-                    source.Mesh,
-                    source.SubMeshIndex,
-                    runtimeMaterial,
-                    source.LocalMatrix,
-                    source.ShadowCastingMode,
-                    source.ReceiveShadows,
-                    source.Layer);
-            }
-
+            PrototypeSharedRuntime sharedRuntime = GetOrCreateSharedRuntime(prototype);
             runtimes[prototypeIndex] = new PrototypeRuntime(
                 placementBuckets[prototypeIndex] ?? new List<int>(),
-                renderEntries);
+                sharedRuntime.RenderEntries);
         }
 
         return runtimes;
+    }
+
+    private IEnumerator BuildPrototypeRuntimesOverMultipleFrames()
+    {
+        double frameBudgetMilliseconds = Math.Max(0.1f, _prototypeInitBudgetMsPerFrame);
+        var totalStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        var placementBuckets = new List<int>[_prototypes.Length];
+
+        for (int placementIndex = 0; placementIndex < _placements.Length; placementIndex++)
+        {
+            TileLoaderInstancedVegetationPlacement placement = _placements[placementIndex];
+            if ((uint)placement.PrototypeIndex < (uint)_prototypes.Length)
+            {
+                placementBuckets[placement.PrototypeIndex] ??= new List<int>();
+                placementBuckets[placement.PrototypeIndex].Add(placementIndex);
+            }
+
+            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            {
+                continue;
+            }
+
+            frameStopwatch.Restart();
+            yield return null;
+        }
+
+        for (int prototypeIndex = 0; prototypeIndex < _prototypes.Length; prototypeIndex++)
+        {
+            TileLoaderInstancedVegetationPrototype prototype = _prototypes[prototypeIndex];
+            if (prototype == null || prototype.RenderSources.Count == 0)
+            {
+                _prototypeRuntimes[prototypeIndex] = PrototypeRuntime.Empty;
+            }
+            else
+            {
+                PrototypeSharedRuntime sharedRuntime = GetOrCreateSharedRuntime(prototype);
+                _prototypeRuntimes[prototypeIndex] = new PrototypeRuntime(
+                    placementBuckets[prototypeIndex] ?? new List<int>(),
+                    sharedRuntime.RenderEntries);
+            }
+
+            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            {
+                continue;
+            }
+
+            frameStopwatch.Restart();
+            yield return null;
+        }
+
+        totalStopwatch.Stop();
+        LastPrototypeInitializationMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
+        LastInitializationCpuMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
+        IsPrototypeRuntimeReady = true;
+        _runtimeBuildCoroutine = null;
+        enabled = _prototypeRuntimes.Length > 0;
+    }
+
+    private static PrototypeSharedRuntime GetOrCreateSharedRuntime(TileLoaderInstancedVegetationPrototype prototype)
+    {
+        if (prototype.SharedRuntime is PrototypeSharedRuntime cachedRuntime)
+        {
+            return cachedRuntime;
+        }
+
+        var renderEntries = new RenderEntryRuntime[prototype.RenderSources.Count];
+        for (int sourceIndex = 0; sourceIndex < prototype.RenderSources.Count; sourceIndex++)
+        {
+            TileLoaderInstancedVegetationRenderSource source = prototype.RenderSources[sourceIndex];
+            Material runtimeMaterial = CreateRuntimeInstancedMaterial(source.Material);
+            renderEntries[sourceIndex] = new RenderEntryRuntime(
+                source.Mesh,
+                source.SubMeshIndex,
+                runtimeMaterial,
+                source.LocalMatrix,
+                source.ShadowCastingMode,
+                source.ReceiveShadows,
+                source.Layer);
+        }
+
+        var sharedRuntime = new PrototypeSharedRuntime(renderEntries);
+        prototype.SharedRuntime = sharedRuntime;
+        return sharedRuntime;
     }
 
     private static Material CreateRuntimeInstancedMaterial(Material sourceMaterial)
@@ -406,6 +542,10 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         instance.transform.localPosition = placement.LocalPosition;
         instance.transform.localRotation = placement.LocalRotation;
         instance.transform.localScale = placement.LocalScale;
+        if (placement.ConformToTerrainOnPromotion)
+        {
+            ConformPromotedPlacementToTerrain(instance.transform, placement);
+        }
 
         TileLoaderPromotedVegetationInstance marker = instance.GetComponent<TileLoaderPromotedVegetationInstance>();
         if (marker == null)
@@ -416,6 +556,40 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         marker.PlacementIndex = placementIndex;
         state.PromotedRoot = instance;
         state.IsPromoted = true;
+    }
+
+    private void ConformPromotedPlacementToTerrain(
+        Transform promotedTransform,
+        TileLoaderInstancedVegetationPlacement placement)
+    {
+        if (promotedTransform == null)
+        {
+            return;
+        }
+
+#if GRIFFIN
+        GStylizedTerrain terrain = GetComponentInParent<GStylizedTerrain>();
+        if (terrain == null || !terrain.isActiveAndEnabled || terrain.TerrainData == null)
+        {
+            return;
+        }
+
+        Vector3 worldOrigin = transform.TransformPoint(
+            new Vector3(
+                placement.SurfaceSampleLocalX,
+                Mathf.Max(placement.LocalPosition.y + 32f, 64f),
+                placement.SurfaceSampleLocalZ));
+        if (!terrain.Raycast(new Ray(worldOrigin, Vector3.down), out RaycastHit terrainHit, 512f))
+        {
+            return;
+        }
+
+        promotedTransform.rotation = Quaternion.FromToRotation(Vector3.up, terrainHit.normal);
+        promotedTransform.position =
+            terrainHit.point +
+            terrain.transform.up * placement.SurfaceVerticalOffset +
+            terrainHit.normal * placement.SurfaceNormalOffset;
+#endif
     }
 
     private void DemotePlacement(int placementIndex)
@@ -500,43 +674,21 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
     private void ReleaseRuntimeData()
     {
+        if (_runtimeBuildCoroutine != null)
+        {
+            StopCoroutine(_runtimeBuildCoroutine);
+            _runtimeBuildCoroutine = null;
+        }
+
         ReleasePromotedInstances();
-        DestroyRuntimeMaterials();
         _prototypes = Array.Empty<TileLoaderInstancedVegetationPrototype>();
         _placements = Array.Empty<TileLoaderInstancedVegetationPlacement>();
         _prototypeRuntimes = Array.Empty<PrototypeRuntime>();
         _placementStates = Array.Empty<PlacementRuntimeState>();
         _promotedContainer = null;
-    }
-
-    private void DestroyRuntimeMaterials()
-    {
-        for (int prototypeIndex = 0; prototypeIndex < _prototypeRuntimes.Length; prototypeIndex++)
-        {
-            PrototypeRuntime prototypeRuntime = _prototypeRuntimes[prototypeIndex];
-            if (prototypeRuntime == null)
-            {
-                continue;
-            }
-
-            for (int renderEntryIndex = 0; renderEntryIndex < prototypeRuntime.RenderEntries.Length; renderEntryIndex++)
-            {
-                RenderEntryRuntime renderEntry = prototypeRuntime.RenderEntries[renderEntryIndex];
-                if (renderEntry == null || !renderEntry.OwnsMaterial || renderEntry.Material == null)
-                {
-                    continue;
-                }
-
-                if (Application.isPlaying)
-                {
-                    Destroy(renderEntry.Material);
-                }
-                else
-                {
-                    DestroyImmediate(renderEntry.Material);
-                }
-            }
-        }
+        IsPrototypeRuntimeReady = false;
+        LastPrototypeInitializationMilliseconds = 0d;
+        LastInitializationCpuMilliseconds = 0d;
     }
 
     private Transform? ResolveInteractionTarget()
@@ -597,6 +749,16 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         public RenderEntryRuntime[] RenderEntries { get; }
     }
 
+    private sealed class PrototypeSharedRuntime
+    {
+        public PrototypeSharedRuntime(RenderEntryRuntime[] renderEntries)
+        {
+            RenderEntries = renderEntries ?? throw new ArgumentNullException(nameof(renderEntries));
+        }
+
+        public RenderEntryRuntime[] RenderEntries { get; }
+    }
+
     private sealed class RenderEntryRuntime
     {
         public RenderEntryRuntime(
@@ -615,7 +777,6 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             ShadowCastingMode = shadowCastingMode;
             ReceiveShadows = receiveShadows;
             Layer = layer;
-            OwnsMaterial = material != null && material.name.EndsWith(" (Instanced)", StringComparison.Ordinal);
         }
 
         public Mesh Mesh { get; }
@@ -625,7 +786,6 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         public ShadowCastingMode ShadowCastingMode { get; }
         public bool ReceiveShadows { get; }
         public int Layer { get; }
-        public bool OwnsMaterial { get; }
     }
 
     private struct PlacementRuntimeState

@@ -3,11 +3,14 @@
         "name": "Conifer Tree",
         "category": "Vegetation",
         "vegetationCategory": "tree",
+        "streamingTier": "canopy",
+        "outerTilePolicy": "full",
+        "loadDistanceMeters": 320,
         "prefab": "Assets/Synty/PolygonNatureBiomes/PNB_Alpine_Mountain/Prefabs/SM_Env_Pine_01.prefab",
         "prefabs": [
             {
                 "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_01.prefab",
-                "probability": 0.0
+                "probability": 15.0
             },
             {
                 "path": "Assets/PolygonNature/Prefabs/Trees/SM_Tree_Pine_02.prefab",
@@ -33,6 +36,9 @@
         "name": "Big Tree",
         "category": "Vegetation",
         "vegetationCategory": "tree",
+        "streamingTier": "large",
+        "outerTilePolicy": "full",
+        "loadDistanceMeters": 320,
         "prefab": "Prefabs/Vegetation/deciduous_forest/Tree_Birch_Big_1.prefab",
         "prefabs": [
             {
@@ -54,6 +60,11 @@
         "name": "Bush",
         "category": "Vegetation",
         "vegetationCategory": "understory",
+        "streamingTier": "clutter",
+        "outerTilePolicy": "reduced",
+        "outerTileDensityScale": 0.25,
+        "loadDistanceMeters": 140,
+        "maxPlacementsPerTile": 192,
         "prefab": "Prefabs/Vegetation/deciduous_forest/Bush3.prefab",
         "prefabs": [
             {
@@ -75,6 +86,11 @@
         "name": "Stone",
         "category": "Decoration",
         "vegetationCategory": "debris",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 90,
+        "maxPlacementsPerTile": 128,
         "itemId": "stone",
         "prefab": "Assets/CustomAssets/stone.prefab",
         "previewColour": "#808080"
@@ -83,6 +99,11 @@
         "name": "Branch",
         "category": "Decoration",
         "vegetationCategory": "debris",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 70,
+        "maxPlacementsPerTile": 128,
         "itemId": "branch",
         "previewColour": "#A67C52"
     },
@@ -90,6 +111,11 @@
         "name": "Long Branch",
         "category": "Decoration",
         "vegetationCategory": "debris",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 70,
+        "maxPlacementsPerTile": 128,
         "itemId": "long_branch",
         "previewColour": "#8B6A45"
     },
@@ -97,6 +123,11 @@
         "name": "Small Log",
         "category": "Decoration",
         "vegetationCategory": "debris",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 80,
+        "maxPlacementsPerTile": 128,
         "itemId": "small_log",
         "previewColour": "#6F4B2A"
     },
@@ -104,6 +135,11 @@
         "name": "Flint",
         "category": "Decoration",
         "vegetationCategory": "debris",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 90,
+        "maxPlacementsPerTile": 128,
         "itemId": "flint",
         "prefab": "Assets/CustomAssets/flint_stone.prefab",
         "previewColour": "#6E7480"
@@ -112,6 +148,11 @@
         "name": "Forest Herb",
         "category": "Vegetation",
         "vegetationCategory": "understory",
+        "streamingTier": "clutter",
+        "outerTilePolicy": "reduced",
+        "outerTileDensityScale": 0.25,
+        "loadDistanceMeters": 120,
+        "maxPlacementsPerTile": 192,
         "prefab": "Prefabs/Vegetation/deciduous_forest/Bush5.prefab",
         "prefabs": [
             {
@@ -133,6 +174,9 @@
         "name": "Wetland Reed",
         "category": "Vegetation",
         "vegetationCategory": "edge",
+        "streamingTier": "canopy",
+        "outerTilePolicy": "full",
+        "loadDistanceMeters": 120,
         "prefabs": [
             {
                 "path": "Prefabs/Vegetation/riparian/reeds_1.prefab",
@@ -153,6 +197,9 @@
         "name": "Willows",
         "category": "Vegetation",
         "vegetationCategory": "edge",
+        "streamingTier": "canopy",
+        "outerTilePolicy": "full",
+        "loadDistanceMeters": 260,
         "prefabs": [
             {
                 "path": "Prefabs/Vegetation/riparian/willow_1.prefab",
@@ -169,6 +216,9 @@
         "name": "Oak",
         "category": "Vegetation",
         "vegetationCategory": "tree",
+        "streamingTier": "canopy",
+        "outerTilePolicy": "full",
+        "loadDistanceMeters": 320,
         "prefabs": [
             {
                 "path": "Prefabs/Vegetation/deciduous_forest/Tree_Oak_Big_1.prefab",
@@ -185,6 +235,9 @@
         "name": "Beech",
         "category": "Vegetation",
         "vegetationCategory": "tree",
+        "streamingTier": "canopy",
+        "outerTilePolicy": "full",
+        "loadDistanceMeters": 320,
         "prefabs": [
             {
                 "path": "Prefabs/Vegetation/deciduous_forest/Tree_Beech_Big_1.prefab",
@@ -205,15 +258,24 @@
         "name": "Dirt Patch",
         "category": "Vegetation",
         "vegetationCategory": "ground",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 55,
+        "maxPlacementsPerTile": 192,
         "layer": 0,
         "prefabs": [
             {
-                "path": "Prefabs/Vegetation/groundcover/dirt_big.prefab",
-                "probability": 0.2
+                "path": "Assets/Synty/PolygonGeneric/Prefabs/Environment/SM_Gen_Env_Ground_Dirt_01.prefab",
+                "probability": 0.34
             },
             {
-                "path": "Prefabs/Vegetation/groundcover/dirt_small.prefab",
-                "probability": 0.8
+                "path": "Assets/Synty/PolygonGeneric/Prefabs/Environment/SM_Gen_Env_Ground_Dirt_02.prefab",
+                "probability": 0.33
+            },
+            {
+                "path": "Assets/Synty/PolygonGeneric/Prefabs/Environment/SM_Gen_Env_Ground_Dirt_03.prefab",
+                "probability": 0.33
             }
         ],
         "previewColour": "#3F7F3F"
@@ -222,18 +284,24 @@
         "name": "Grass Patch",
         "category": "Vegetation",
         "vegetationCategory": "ground",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "instancingMode": "always_gpu_instanced",
+        "loadDistanceMeters": 60,
+        "maxPlacementsPerTile": 192,
         "layer": 0,
         "prefabs": [
             {
-                "path": "Prefabs/Vegetation/groundcover/grass_big.prefab",
+                "path": "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Short_Clump_01.prefab",
                 "probability": 0.33
             },
             {
-                "path": "Prefabs/Vegetation/groundcover/grass_big_2.prefab",
+                "path": "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Short_Clump_02.prefab",
                 "probability": 0.33
             },
             {
-                "path": "Prefabs/Vegetation/groundcover/grass_big_3.prefab",
+                "path": "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Short_Clump_03.prefab",
                 "probability": 0.33
             }
         ],
@@ -243,6 +311,11 @@
         "name": "yarrow cluster",
         "category": "Vegetation",
         "vegetationCategory": "understory",
+        "streamingTier": "clutter",
+        "outerTilePolicy": "reduced",
+        "outerTileDensityScale": 0.25,
+        "loadDistanceMeters": 120,
+        "maxPlacementsPerTile": 192,
         "prefab": "Prefabs/Vegetation/coniferous_forest/yarrow_cluster.prefab",
         "previewColour": "#FF8BFF"
     },
@@ -250,6 +323,11 @@
         "name": "young coniferous tree cluster",
         "category": "Vegetation",
         "vegetationCategory": "understory",
+        "streamingTier": "clutter",
+        "outerTilePolicy": "reduced",
+        "outerTileDensityScale": 0.25,
+        "loadDistanceMeters": 140,
+        "maxPlacementsPerTile": 192,
         "prefab": "Prefabs/Vegetation/coniferous_forest/young_coniferous_tree_cluster.prefab",
         "previewColour": "#008BFF"
     },
@@ -257,6 +335,11 @@
         "name": "grass cluster",
         "category": "Vegetation",
         "vegetationCategory": "understory",
+        "streamingTier": "clutter",
+        "outerTilePolicy": "reduced",
+        "outerTileDensityScale": 0.25,
+        "loadDistanceMeters": 70,
+        "maxPlacementsPerTile": 192,
         "prefab": "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Tall_Clump_03.prefab",
         "previewColour": "#55FF55"
     },
@@ -264,6 +347,11 @@
         "name": "Blueberry Bush",
         "category": "Vegetation",
         "vegetationCategory": "understory",
+        "streamingTier": "clutter",
+        "outerTilePolicy": "reduced",
+        "outerTileDensityScale": 0.25,
+        "loadDistanceMeters": 130,
+        "maxPlacementsPerTile": 192,
         "prefab": "Prefabs/Vegetation/coniferous_forest/blueberry_bush.prefab",
         "previewColour": "#4B7BEC"
     },
@@ -271,6 +359,11 @@
         "name": "Nettle Patch",
         "category": "Vegetation",
         "vegetationCategory": "nettle",
+        "streamingTier": "ground",
+        "outerTilePolicy": "skip",
+        "outerTileDensityScale": 0.0,
+        "loadDistanceMeters": 65,
+        "maxPlacementsPerTile": 96,
         "prefab": "Assets/CustomAssets/nettle.prefab",
         "previewColour": "#79B24A"
     }
