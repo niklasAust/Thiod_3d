@@ -114,7 +114,7 @@ Material:
     - _BUILTIN_ZWriteControl: 0
     - _Blend: 0
     - _BlendModePreserveSpecular: 1
-    - _Breeze_Strength: 0.2
+    - _Breeze_Strength: 0.297
     - _BumpScale: 1
     - _CastShadows: 1
     - _Color_Noise_Large_Freq: 0
@@ -168,9 +168,9 @@ Material:
     - _Leaf_Metallic: 0
     - _Leaf_Normal_Strength: 0.711
     - _Leaf_Smoothness: 0
-    - _Light_Wind_Strength: 0.2
+    - _Light_Wind_Strength: 0.343
     - _Light_Wind_Use_Leaf_Fade: 1
-    - _Light_Wind_Y_Offset: 0
+    - _Light_Wind_Y_Offset: 0.366
     - _Light_Wind_Y_Strength: 1
     - _Metallic: 0
     - _Mode: 1
@@ -188,7 +188,7 @@ Material:
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
     - _Strong_Wind_Frequency: 0.5
-    - _Strong_Wind_Strength: 0.2
+    - _Strong_Wind_Strength: 0.382
     - _Surface: 0
     - _TotalWindAmount: 0.167
     - _TrunkFlatColourSwitch: 0
@@ -203,10 +203,10 @@ Material:
     - _UVSec: 0
     - _Use_Color_Noise: 0
     - _Use_Global_Weather_Controller: 0
-    - _Use_Vertex_Color_Wind: 1
+    - _Use_Vertex_Color_Wind: 0
     - _WindBaseline: 0
     - _WindDirection: 0
-    - _Wind_Twist_Strength: 0.15
+    - _Wind_Twist_Strength: 0.516
     - _WorkflowMode: 1
     - _Y_multiplier: -2
     - _ZTest: 4
