@@ -224,12 +224,14 @@ internal sealed class HybridVegetationBuildState
         GeneratedTerrainBatchState? batchState,
         GStylizedTerrain terrain,
         GeneratedTerrainRequest request,
+        Transform? existingVegetationContainer,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
         BatchState = batchState;
         Terrain = terrain;
         Request = request;
+        ExistingVegetationContainer = existingVegetationContainer;
         NormalizationMinHeight = normalizationMinHeight;
         NormalizationMaxHeight = normalizationMaxHeight;
         Prototypes = new List<TileLoaderInstancedVegetationPrototype>();
@@ -240,6 +242,7 @@ internal sealed class HybridVegetationBuildState
     public GeneratedTerrainBatchState? BatchState { get; }
     public GStylizedTerrain Terrain { get; }
     public GeneratedTerrainRequest Request { get; }
+    public Transform? ExistingVegetationContainer { get; }
     public double NormalizationMinHeight { get; }
     public double NormalizationMaxHeight { get; }
     public Transform? VegetationContainer { get; set; }
@@ -248,6 +251,7 @@ internal sealed class HybridVegetationBuildState
     public Dictionary<string, int> PrototypeIndices { get; }
     public int NextPlacementIndex { get; set; }
     public int LastFinalizedPlacementCount { get; set; }
+    public bool HasSwappedVegetationContainer { get; set; }
 }
 
 internal sealed class VegetationWorkItem
@@ -419,6 +423,76 @@ internal readonly struct PreparedVegetationPlacement
             ForceInstancingOnly,
             geometry);
     }
+}
+
+internal readonly struct PlayerCentricSurfaceCellKey : IEquatable<PlayerCentricSurfaceCellKey>
+{
+    public PlayerCentricSurfaceCellKey(int x, int y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public int X { get; }
+    public int Y { get; }
+
+    public bool Equals(PlayerCentricSurfaceCellKey other)
+        => X == other.X && Y == other.Y;
+
+    public override bool Equals(object? obj)
+        => obj is PlayerCentricSurfaceCellKey other && Equals(other);
+
+    public override int GetHashCode()
+        => HashCode.Combine(X, Y);
+
+    public override string ToString()
+        => $"cell({X},{Y})";
+}
+
+internal sealed class PlayerCentricSurfaceCellSource
+{
+    public PlayerCentricSurfaceCellSource(
+        PlayerCentricSurfaceCellKey cellKey,
+        Vector2Int ownerTileCoordinate,
+        GStylizedTerrain terrain)
+    {
+        CellKey = cellKey;
+        OwnerTileCoordinate = ownerTileCoordinate;
+        Terrain = terrain;
+        Prototypes = new List<TileLoaderInstancedVegetationPrototype>();
+        Placements = new List<TileLoaderInstancedVegetationPlacement>();
+        PrototypeIndices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public PlayerCentricSurfaceCellKey CellKey { get; }
+    public Vector2Int OwnerTileCoordinate { get; }
+    public GStylizedTerrain Terrain { get; set; }
+    public List<TileLoaderInstancedVegetationPrototype> Prototypes { get; }
+    public List<TileLoaderInstancedVegetationPlacement> Placements { get; }
+    public Dictionary<string, int> PrototypeIndices { get; }
+    public Transform? RuntimeContainer { get; set; }
+    public int PlacementCount => Placements.Count;
+}
+
+internal sealed class PlayerCentricSurfaceTileCache
+{
+    public PlayerCentricSurfaceTileCache(
+        Vector2Int tileCoordinate,
+        string cacheSignature,
+        GStylizedTerrain terrain)
+    {
+        TileCoordinate = tileCoordinate;
+        CacheSignature = cacheSignature ?? string.Empty;
+        Terrain = terrain;
+        TerrainInstanceId = terrain != null ? terrain.GetInstanceID() : 0;
+        CellKeys = new HashSet<PlayerCentricSurfaceCellKey>();
+    }
+
+    public Vector2Int TileCoordinate { get; }
+    public string CacheSignature { get; set; }
+    public GStylizedTerrain Terrain { get; set; }
+    public int TerrainInstanceId { get; set; }
+    public HashSet<PlayerCentricSurfaceCellKey> CellKeys { get; }
 }
 
 internal sealed class VegetationTileStreamingStats
@@ -723,6 +797,7 @@ internal sealed class GeneratedTerrainBatchState
         RiverRefreshTerrains = new List<GStylizedTerrain>(Requests.Count);
         VegetationRefreshRequests = new List<GeneratedTerrainRequest>(Requests.Count);
         VegetationRefreshTerrains = new List<GStylizedTerrain>(Requests.Count);
+        VegetationClearOnlyTerrains = new List<GStylizedTerrain>(Requests.Count);
         PhaseTimingsMilliseconds = new Dictionary<string, double>(StringComparer.Ordinal);
         VegetationTileStats = new Dictionary<Vector2Int, VegetationTileStreamingStats>();
         MissingPrefabCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -748,6 +823,7 @@ internal sealed class GeneratedTerrainBatchState
     public List<GStylizedTerrain> RiverRefreshTerrains { get; }
     public List<GeneratedTerrainRequest> VegetationRefreshRequests { get; }
     public List<GStylizedTerrain> VegetationRefreshTerrains { get; }
+    public List<GStylizedTerrain> VegetationClearOnlyTerrains { get; }
     public Dictionary<string, double> PhaseTimingsMilliseconds { get; }
     public Dictionary<Vector2Int, VegetationTileStreamingStats> VegetationTileStats { get; }
     public Dictionary<string, int> MissingPrefabCountsByPath { get; }
@@ -787,6 +863,16 @@ internal sealed class GeneratedTerrainBatchState
     public int VegetationRaycastSampleCount { get; set; }
     public double VegetationCenterReadyMilliseconds { get; set; }
     public double VegetationFullSettledMilliseconds { get; set; }
+    public int PlayerCentricSurfaceTileCacheBuildCount { get; set; }
+    public int PlayerCentricSurfaceCellBuildCount { get; set; }
+    public int PlayerCentricSurfacePlacementCount { get; set; }
+    public int PlayerCentricSurfaceActiveCellCount { get; set; }
+    public int PlayerCentricSurfaceActivatedCellCount { get; set; }
+    public int PlayerCentricSurfaceDeactivatedCellCount { get; set; }
+    public int PlayerCentricSurfaceMissingPrefabCount { get; set; }
+    public double PlayerCentricSurfaceSourceBuildCpuMilliseconds { get; set; }
+    public double PlayerCentricSurfaceFirstVisibleMilliseconds { get; set; }
+    public double PlayerCentricSurfaceFullSettledMilliseconds { get; set; }
 
     public void RecordPhaseTiming(string phaseName, double elapsedMilliseconds)
     {

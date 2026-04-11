@@ -45,6 +45,7 @@ public sealed class TileLoader : MonoBehaviour
     private const double MaxTileHeightUnits = 42.0;
     private const double MetersPerTileHeightUnit = PreviewMaxElevationMeters / MaxTileHeightUnits;
     private const int VegetationStreamingPolicyVersion = 1;
+    private const int PlayerCentricSurfaceCacheVersion = 2;
 
     [Header("World Source")]
     [SerializeField] private string worldDataFile = "test_map.msgpack";
@@ -60,6 +61,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private bool dynamicTileLoadingEnabled = false;
     [SerializeField] private Transform? dynamicLoadTargetOverride;
     [SerializeField, Min(0.01f)] private float dynamicLoadCheckIntervalSeconds = 0.10f;
+    [SerializeField, Range(0f, 0.49f)] private float dynamicLoadPreloadFraction = 0.22f;
     [SerializeField] private bool reuseOverlappingDynamicNeighborhoodTiles = true;
 
     [Header("Generation Overrides")]
@@ -158,8 +160,18 @@ public sealed class TileLoader : MonoBehaviour
     [FormerlySerializedAs("grassClusterVerticalOffset")]
     [SerializeField] private float surfaceObjectVerticalOffset = 0f;
 
+    [Header("Player-Centric Surface Vegetation")]
+    [SerializeField] private bool playerCentricSurfaceVegetationEnabled = true;
+    [SerializeField, Min(0f)] private float playerCentricSurfaceRadiusMeters = 80f;
+    [SerializeField, Min(0f)] private float playerCentricSurfaceHysteresisMeters = 16f;
+    [SerializeField, Min(1f)] private float playerCentricSurfaceCellSizeMeters = 16f;
+    [SerializeField, Min(0.01f)] private float playerCentricSurfaceUpdateIntervalSeconds = 0.05f;
+
     [Header("Runtime Load Smoothing")]
     [SerializeField, Min(1)] private int worldgenWorkerCount = 4;
+    [SerializeField, Min(0.25f)] private float terrainCreationBudgetMsPerFrame = 6f;
+    [SerializeField, Min(0.25f)] private float terrainSeamBudgetMsPerFrame = 4f;
+    [SerializeField, Min(0.25f)] private float terrainShadingBudgetMsPerFrame = 4f;
     [FormerlySerializedAs("spreadVegetationInstancingAcrossFrames")]
     [SerializeField] private bool spreadVegetationPlacementAcrossFrames = true;
     [FormerlySerializedAs("vegetationInstancingFrameBudgetMilliseconds")]
@@ -223,6 +235,10 @@ public sealed class TileLoader : MonoBehaviour
 #endif
     private readonly List<GeneratedConiferInstance> generatedConiferInstances = new();
     private readonly Dictionary<Vector2Int, GeneratedTerrainTileData> activeTerrainTileCache = new();
+    private readonly Dictionary<Vector2Int, PlayerCentricSurfaceTileCache> playerCentricSurfaceTileCaches = new();
+    private readonly Dictionary<PlayerCentricSurfaceCellKey, PlayerCentricSurfaceCellSource> playerCentricSurfaceCellSources = new();
+    private readonly Dictionary<int, Vector2Int> playerCentricSurfaceTileByTerrainInstanceId = new();
+    private readonly HashSet<PlayerCentricSurfaceCellKey> activePlayerCentricSurfaceCellKeys = new();
     private readonly Dictionary<string, GameObject?> prefabCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TileLoaderInstancedVegetationPrototype?> vegetationPrototypeCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> loggedMissingPrefabPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -239,11 +255,17 @@ public sealed class TileLoader : MonoBehaviour
     private bool terrainPhaseLoadInProgress;
     private bool dynamicLoadDispatchQueued;
     private Coroutine? activeVegetationPopulationCoroutine;
+    private Coroutine? activeTerrainLoadCoroutine;
     private GeneratedTerrainBatchState? activeVegetationPopulationBatchState;
     private Stopwatch? activeVegetationPopulationStopwatch;
     private TileLoaderTerrainSampler? cachedTerrainSampler;
     private Vector3Int? queuedDynamicUnityTileCoordinate;
     private Vector3Int? activeLoadedUnityTileCoordinate;
+    private readonly HashSet<Vector3Int> queuedDynamicUnityTileCoordinates = new();
+    private Vector3 lastDynamicLoadTargetLocalPosition;
+    private bool hasDynamicLoadTargetLocalPosition;
+    private Vector3? lastVegetationStreamingTargetWorldPosition;
+    private float nextPlayerCentricSurfaceUpdateTime;
     private static readonly Dictionary<string, CachedLoadedWorldData> LoadedWorldDataCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ProfilerMarker BatchWorldgenMarker = new("TileLoader.BatchWorldgen");
     private static readonly ProfilerMarker TerrainCreationMarker = new("TileLoader.TerrainCreation");
@@ -258,6 +280,9 @@ public sealed class TileLoader : MonoBehaviour
     {
         hasLoadedInCurrentEnableCycle = false;
         cachedTerrainSampler = null;
+        hasDynamicLoadTargetLocalPosition = false;
+        lastVegetationStreamingTargetWorldPosition = null;
+        nextPlayerCentricSurfaceUpdateTime = 0f;
 
         if (ShouldLoadOnEnableInEditMode())
         {
@@ -313,8 +338,18 @@ public sealed class TileLoader : MonoBehaviour
     private void OnDisable()
     {
         CancelActiveVegetationPopulation();
+        if (activeTerrainLoadCoroutine != null)
+        {
+            StopCoroutine(activeTerrainLoadCoroutine);
+            activeTerrainLoadCoroutine = null;
+        }
+
         terrainPhaseLoadInProgress = false;
         cachedTerrainSampler = null;
+        hasDynamicLoadTargetLocalPosition = false;
+        queuedDynamicUnityTileCoordinates.Clear();
+        queuedDynamicUnityTileCoordinate = null;
+        nextPlayerCentricSurfaceUpdateTime = 0f;
     }
 
     private void Update()
@@ -330,7 +365,9 @@ public sealed class TileLoader : MonoBehaviour
             RebuildExistingGeneratedTerrainSeams();
         }
 
-        if (dynamicTileLoadingEnabled && RefreshDynamicTileLoading())
+        bool dynamicLoadTriggered = dynamicTileLoadingEnabled && RefreshDynamicTileLoading();
+        UpdatePlayerCentricSurfaceVegetation(forceImmediate: false);
+        if (dynamicLoadTriggered)
         {
             return;
         }
@@ -359,6 +396,363 @@ public sealed class TileLoader : MonoBehaviour
     private bool UsesLegacyVegetationObjects()
     {
         return vegetationLoadMode == VegetationLoadMode.LegacyGameObjects;
+    }
+
+    private bool ShouldUsePlayerCentricSurfaceVegetation()
+    {
+        return Application.isPlaying &&
+               playerCentricSurfaceVegetationEnabled &&
+               placeSurfaceObjects;
+    }
+
+    private static bool IsPlayerCentricSurfaceTier(TileObjectStreamingTier streamingTier)
+    {
+        return streamingTier == TileObjectStreamingTier.Clutter ||
+               streamingTier == TileObjectStreamingTier.Ground;
+    }
+
+    private void ClearPlayerCentricSurfaceCaches()
+    {
+        foreach (PlayerCentricSurfaceCellKey cellKey in activePlayerCentricSurfaceCellKeys.ToArray())
+        {
+            if (playerCentricSurfaceCellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? source))
+            {
+                SetPlayerCentricSurfaceCellActive(source, false);
+            }
+        }
+
+        foreach (KeyValuePair<Vector2Int, PlayerCentricSurfaceTileCache> entry in playerCentricSurfaceTileCaches.ToArray())
+        {
+            RemovePlayerCentricSurfaceTileCache(entry.Key);
+        }
+
+        playerCentricSurfaceTileCaches.Clear();
+        playerCentricSurfaceCellSources.Clear();
+        playerCentricSurfaceTileByTerrainInstanceId.Clear();
+        activePlayerCentricSurfaceCellKeys.Clear();
+    }
+
+    private void PrunePlayerCentricSurfaceTileCaches(IEnumerable<Vector2Int> activeTileCoordinates)
+    {
+        var activeCoordinates = new HashSet<Vector2Int>(activeTileCoordinates);
+        foreach (KeyValuePair<Vector2Int, PlayerCentricSurfaceTileCache> entry in playerCentricSurfaceTileCaches.ToArray())
+        {
+            if (activeCoordinates.Contains(entry.Key))
+            {
+                continue;
+            }
+
+            RemovePlayerCentricSurfaceTileCache(entry.Key);
+        }
+    }
+
+    private void RemovePlayerCentricSurfaceCachesOwnedByContainer(Transform container)
+    {
+        if (container == null)
+        {
+            return;
+        }
+
+        var ownedTiles = new HashSet<Vector2Int>();
+        foreach (GStylizedTerrain terrain in container.GetComponentsInChildren<GStylizedTerrain>(true))
+        {
+            if (terrain == null)
+            {
+                continue;
+            }
+
+            if (playerCentricSurfaceTileByTerrainInstanceId.TryGetValue(terrain.GetInstanceID(), out Vector2Int tileCoordinate))
+            {
+                ownedTiles.Add(tileCoordinate);
+            }
+        }
+
+        foreach (Vector2Int tileCoordinate in ownedTiles)
+        {
+            RemovePlayerCentricSurfaceTileCache(tileCoordinate);
+        }
+    }
+
+    private void RemovePlayerCentricSurfaceTileCache(Vector2Int tileCoordinate)
+    {
+        if (!playerCentricSurfaceTileCaches.TryGetValue(tileCoordinate, out PlayerCentricSurfaceTileCache? cache))
+        {
+            return;
+        }
+
+        if (cache.Terrain != null)
+        {
+            Transform? surfaceRoot = FindPlayerCentricSurfaceRoot(cache.Terrain.transform);
+            if (surfaceRoot != null)
+            {
+                RetireGeneratedContainer(surfaceRoot);
+            }
+        }
+
+        foreach (PlayerCentricSurfaceCellKey cellKey in cache.CellKeys)
+        {
+            activePlayerCentricSurfaceCellKeys.Remove(cellKey);
+            if (playerCentricSurfaceCellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? source))
+            {
+                source.RuntimeContainer = null;
+                playerCentricSurfaceCellSources.Remove(cellKey);
+            }
+        }
+
+        playerCentricSurfaceTileCaches.Remove(tileCoordinate);
+        playerCentricSurfaceTileByTerrainInstanceId.Remove(cache.TerrainInstanceId);
+    }
+
+    private void UpdatePlayerCentricSurfaceVegetation(
+        bool forceImmediate,
+        GeneratedTerrainBatchState? batchState = null,
+        Stopwatch? totalStopwatch = null)
+    {
+        if (!ShouldUsePlayerCentricSurfaceVegetation())
+        {
+            foreach (PlayerCentricSurfaceCellKey activeCellKey in activePlayerCentricSurfaceCellKeys.ToArray())
+            {
+                if (playerCentricSurfaceCellSources.TryGetValue(activeCellKey, out PlayerCentricSurfaceCellSource? activeSource))
+                {
+                    SetPlayerCentricSurfaceCellActive(activeSource, false);
+                }
+            }
+
+            return;
+        }
+
+        if (!forceImmediate && Time.unscaledTime < nextPlayerCentricSurfaceUpdateTime)
+        {
+            return;
+        }
+
+        nextPlayerCentricSurfaceUpdateTime = Time.unscaledTime + Mathf.Max(0.01f, playerCentricSurfaceUpdateIntervalSeconds);
+        Vector3? targetWorldPosition = ResolveVegetationStreamingTargetWorldPosition();
+        int activatedCellCount = 0;
+        int deactivatedCellCount = 0;
+
+        if (!targetWorldPosition.HasValue)
+        {
+            foreach (PlayerCentricSurfaceCellKey activeCellKey in activePlayerCentricSurfaceCellKeys.ToArray())
+            {
+                if (!playerCentricSurfaceCellSources.TryGetValue(activeCellKey, out PlayerCentricSurfaceCellSource? source))
+                {
+                    continue;
+                }
+
+                SetPlayerCentricSurfaceCellActive(source, false);
+                deactivatedCellCount++;
+            }
+
+            RecordPlayerCentricSurfaceUpdate(batchState, totalStopwatch, activatedCellCount, deactivatedCellCount);
+            return;
+        }
+
+        float activationRadius = Mathf.Max(0f, playerCentricSurfaceRadiusMeters);
+        float retentionRadius = activationRadius + Mathf.Max(0f, playerCentricSurfaceHysteresisMeters);
+        var desiredCellKeys = new HashSet<PlayerCentricSurfaceCellKey>();
+        foreach (KeyValuePair<PlayerCentricSurfaceCellKey, PlayerCentricSurfaceCellSource> entry in playerCentricSurfaceCellSources)
+        {
+            float radiusMeters = activePlayerCentricSurfaceCellKeys.Contains(entry.Key)
+                ? retentionRadius
+                : activationRadius;
+            if (DoesPlayerCentricSurfaceCellIntersectRadius(entry.Key, targetWorldPosition.Value, radiusMeters))
+            {
+                desiredCellKeys.Add(entry.Key);
+            }
+        }
+
+        foreach (PlayerCentricSurfaceCellKey activeCellKey in activePlayerCentricSurfaceCellKeys.ToArray())
+        {
+            if (desiredCellKeys.Contains(activeCellKey) ||
+                !playerCentricSurfaceCellSources.TryGetValue(activeCellKey, out PlayerCentricSurfaceCellSource? source))
+            {
+                continue;
+            }
+
+            SetPlayerCentricSurfaceCellActive(source, false);
+            deactivatedCellCount++;
+        }
+
+        foreach (PlayerCentricSurfaceCellKey desiredCellKey in desiredCellKeys)
+        {
+            if (activePlayerCentricSurfaceCellKeys.Contains(desiredCellKey) ||
+                !playerCentricSurfaceCellSources.TryGetValue(desiredCellKey, out PlayerCentricSurfaceCellSource? source))
+            {
+                continue;
+            }
+
+            if (SetPlayerCentricSurfaceCellActive(source, true))
+            {
+                activatedCellCount++;
+            }
+        }
+
+        RecordPlayerCentricSurfaceUpdate(batchState, totalStopwatch, activatedCellCount, deactivatedCellCount);
+    }
+
+    private void RecordPlayerCentricSurfaceUpdate(
+        GeneratedTerrainBatchState? batchState,
+        Stopwatch? totalStopwatch,
+        int activatedCellCount,
+        int deactivatedCellCount)
+    {
+        if (batchState == null)
+        {
+            return;
+        }
+
+        batchState.PlayerCentricSurfaceActivatedCellCount += activatedCellCount;
+        batchState.PlayerCentricSurfaceDeactivatedCellCount += deactivatedCellCount;
+        batchState.PlayerCentricSurfaceActiveCellCount = activePlayerCentricSurfaceCellKeys.Count;
+        if (totalStopwatch == null)
+        {
+            return;
+        }
+
+        double elapsedMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
+        if (batchState.PlayerCentricSurfaceFirstVisibleMilliseconds <= 0d &&
+            activePlayerCentricSurfaceCellKeys.Count > 0)
+        {
+            batchState.PlayerCentricSurfaceFirstVisibleMilliseconds = elapsedMilliseconds;
+        }
+
+        batchState.PlayerCentricSurfaceFullSettledMilliseconds = elapsedMilliseconds;
+    }
+
+    private bool SetPlayerCentricSurfaceCellActive(PlayerCentricSurfaceCellSource source, bool active)
+    {
+        if (source == null)
+        {
+            return false;
+        }
+
+        if (!active)
+        {
+            if (source.RuntimeContainer != null)
+            {
+                source.RuntimeContainer.gameObject.SetActive(false);
+            }
+
+            activePlayerCentricSurfaceCellKeys.Remove(source.CellKey);
+            return false;
+        }
+
+        if (source.Terrain == null || source.Placements.Count == 0)
+        {
+            return false;
+        }
+
+        Transform surfaceRoot = GetOrCreatePlayerCentricSurfaceRoot(source.Terrain.transform);
+        if (source.RuntimeContainer == null)
+        {
+            string cellContainerName = GetPlayerCentricSurfaceCellContainerName(source.CellKey);
+            Transform? existing = surfaceRoot.Find(cellContainerName);
+            if (existing == null)
+            {
+                var container = new GameObject(cellContainerName);
+                container.transform.SetParent(surfaceRoot, false);
+                container.transform.localPosition = Vector3.zero;
+                container.transform.localRotation = Quaternion.identity;
+                container.transform.localScale = Vector3.one;
+                source.RuntimeContainer = container.transform;
+            }
+            else
+            {
+                source.RuntimeContainer = existing;
+            }
+
+            TileLoaderInstancedVegetationRenderer renderer =
+                source.RuntimeContainer.GetComponent<TileLoaderInstancedVegetationRenderer>() ??
+                source.RuntimeContainer.gameObject.AddComponent<TileLoaderInstancedVegetationRenderer>();
+            source.RuntimeContainer.gameObject.SetActive(true);
+            renderer.Initialize(
+                source.Prototypes,
+                source.Placements,
+                interactive: false,
+                interactionRadiusMeters: 0f,
+                interactionHysteresisMeters: 0f,
+                prototypeInitBudgetMsPerFrame);
+        }
+        else if (!source.RuntimeContainer.gameObject.activeSelf)
+        {
+            source.RuntimeContainer.gameObject.SetActive(true);
+        }
+
+        activePlayerCentricSurfaceCellKeys.Add(source.CellKey);
+        return source.RuntimeContainer != null && source.RuntimeContainer.gameObject.activeInHierarchy;
+    }
+
+    private bool DoesPlayerCentricSurfaceCellIntersectRadius(
+        PlayerCentricSurfaceCellKey cellKey,
+        Vector3 targetWorldPosition,
+        float radiusMeters)
+    {
+        if (radiusMeters <= 0f)
+        {
+            return false;
+        }
+
+        float cellSizeMeters = Mathf.Max(1f, playerCentricSurfaceCellSizeMeters);
+        float minX = cellKey.X * cellSizeMeters;
+        float maxX = minX + cellSizeMeters;
+        float minZ = cellKey.Y * cellSizeMeters;
+        float maxZ = minZ + cellSizeMeters;
+        float deltaX = targetWorldPosition.x < minX
+            ? minX - targetWorldPosition.x
+            : targetWorldPosition.x > maxX
+                ? targetWorldPosition.x - maxX
+                : 0f;
+        float deltaZ = targetWorldPosition.z < minZ
+            ? minZ - targetWorldPosition.z
+            : targetWorldPosition.z > maxZ
+                ? targetWorldPosition.z - maxZ
+                : 0f;
+        return deltaX * deltaX + deltaZ * deltaZ <= radiusMeters * radiusMeters;
+    }
+
+    private PlayerCentricSurfaceCellKey ResolvePlayerCentricSurfaceCellKey(Vector3 worldPosition)
+    {
+        float cellSizeMeters = Mathf.Max(1f, playerCentricSurfaceCellSizeMeters);
+        return new PlayerCentricSurfaceCellKey(
+            Mathf.FloorToInt(worldPosition.x / cellSizeMeters),
+            Mathf.FloorToInt(worldPosition.z / cellSizeMeters));
+    }
+
+    private string GetPlayerCentricSurfaceRootName()
+    {
+        return GetVegetationContainerName() + "_Surface";
+    }
+
+    private string GetPlayerCentricSurfaceCellContainerName(PlayerCentricSurfaceCellKey cellKey)
+    {
+        return $"Cell_{cellKey.X}_{cellKey.Y}";
+    }
+
+    private Transform? FindPlayerCentricSurfaceRoot(Transform terrainTransform)
+    {
+        if (terrainTransform == null)
+        {
+            return null;
+        }
+
+        return terrainTransform.Find(GetPlayerCentricSurfaceRootName());
+    }
+
+    private Transform GetOrCreatePlayerCentricSurfaceRoot(Transform terrainTransform)
+    {
+        Transform? existing = FindPlayerCentricSurfaceRoot(terrainTransform);
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        var container = new GameObject(GetPlayerCentricSurfaceRootName());
+        container.transform.SetParent(terrainTransform, false);
+        container.transform.localPosition = Vector3.zero;
+        container.transform.localRotation = Quaternion.identity;
+        container.transform.localScale = Vector3.one;
+        return container.transform;
     }
 
     private void OnValidate()
@@ -546,7 +940,7 @@ public sealed class TileLoader : MonoBehaviour
         unityTileCoordinate = runtimeTileCoordinate;
         if (terrainPhaseLoadInProgress)
         {
-            queuedDynamicUnityTileCoordinate = runtimeTileCoordinate;
+            EnqueueDynamicTileLoadRequest(runtimeTileCoordinate);
             return false;
         }
 
@@ -564,23 +958,31 @@ public sealed class TileLoader : MonoBehaviour
     private void RequestDynamicTileLoad(Vector3Int tileCoordinate, bool forceImmediate = false)
     {
         unityTileCoordinate = tileCoordinate;
+        EnqueueDynamicTileLoadRequest(tileCoordinate);
 
         if (!forceImmediate &&
             activeLoadedUnityTileCoordinate.HasValue &&
             activeLoadedUnityTileCoordinate.Value == tileCoordinate &&
             HasGeneratedTerrains())
         {
-            queuedDynamicUnityTileCoordinate = null;
+            queuedDynamicUnityTileCoordinates.Remove(tileCoordinate);
+            if (queuedDynamicUnityTileCoordinate == tileCoordinate)
+            {
+                queuedDynamicUnityTileCoordinate = null;
+            }
             return;
         }
 
         if (terrainPhaseLoadInProgress)
         {
-            queuedDynamicUnityTileCoordinate = tileCoordinate;
             return;
         }
 
-        queuedDynamicUnityTileCoordinate = null;
+        queuedDynamicUnityTileCoordinates.Remove(tileCoordinate);
+        if (queuedDynamicUnityTileCoordinate == tileCoordinate)
+        {
+            queuedDynamicUnityTileCoordinate = null;
+        }
         LoadTileIntoScene();
     }
 
@@ -593,7 +995,110 @@ public sealed class TileLoader : MonoBehaviour
             return false;
         }
 
-        return TryGetUnityTileCoordinateForWorldPosition(target.position, out tileCoordinate);
+        return TryGetDynamicLoadTileCoordinateForWorldPosition(target.position, out tileCoordinate);
+    }
+
+    private bool TryGetDynamicLoadTileCoordinateForWorldPosition(Vector3 worldPosition, out Vector3Int tileCoordinate)
+    {
+        if (!TryGetUnityTileCoordinateForWorldPosition(worldPosition, out Vector3Int baseTileCoordinate))
+        {
+            tileCoordinate = unityTileCoordinate;
+            return false;
+        }
+
+        tileCoordinate = baseTileCoordinate;
+        if (!Application.isPlaying || !dynamicTileLoadingEnabled)
+        {
+            return true;
+        }
+
+        float preloadFraction = Mathf.Clamp(dynamicLoadPreloadFraction, 0f, 0.49f);
+        if (preloadFraction <= 0f)
+        {
+            return true;
+        }
+
+        float safeTerrainWidth = Mathf.Max(0.01f, terrainWidth);
+        float safeTerrainLength = Mathf.Max(0.01f, terrainLength);
+        Vector3 localPosition = transform.InverseTransformPoint(worldPosition);
+        float tileCoordinateX = localPosition.x / safeTerrainWidth;
+        float tileCoordinateY = localPosition.z / safeTerrainLength;
+        float deltaTileX = 0f;
+        float deltaTileY = 0f;
+        if (hasDynamicLoadTargetLocalPosition)
+        {
+            deltaTileX = (localPosition.x - lastDynamicLoadTargetLocalPosition.x) / safeTerrainWidth;
+            deltaTileY = (localPosition.z - lastDynamicLoadTargetLocalPosition.z) / safeTerrainLength;
+        }
+
+        Vector3Int latchedTargetCoordinate = ResolveLatchedDynamicLoadCoordinate(baseTileCoordinate);
+        tileCoordinate = new Vector3Int(
+            ResolveDynamicLoadAxisCoordinate(
+                baseTileCoordinate.x,
+                latchedTargetCoordinate.x,
+                tileCoordinateX,
+                deltaTileX,
+                preloadFraction),
+            ResolveDynamicLoadAxisCoordinate(
+                baseTileCoordinate.y,
+                latchedTargetCoordinate.y,
+                tileCoordinateY,
+                deltaTileY,
+                preloadFraction),
+            unityTileCoordinate.z);
+
+        lastDynamicLoadTargetLocalPosition = localPosition;
+        hasDynamicLoadTargetLocalPosition = true;
+        return true;
+    }
+
+    private Vector3Int ResolveLatchedDynamicLoadCoordinate(Vector3Int fallbackCoordinate)
+    {
+        if (queuedDynamicUnityTileCoordinate.HasValue)
+        {
+            return queuedDynamicUnityTileCoordinate.Value;
+        }
+
+        if (queuedDynamicUnityTileCoordinates.Count > 0 &&
+            TryResolveBestQueuedDynamicTileCoordinate(out Vector3Int queuedCoordinate))
+        {
+            return queuedCoordinate;
+        }
+
+        return activeLoadedUnityTileCoordinate ?? fallbackCoordinate;
+    }
+
+    private static int ResolveDynamicLoadAxisCoordinate(
+        int baseTileCoordinate,
+        int latchedTargetCoordinate,
+        float tileCoordinate,
+        float deltaTile,
+        float preloadFraction)
+    {
+        float tileProgress = tileCoordinate - Mathf.Floor(tileCoordinate);
+        int latchedDelta = latchedTargetCoordinate - baseTileCoordinate;
+        if (latchedDelta == 1 && tileProgress > preloadFraction)
+        {
+            return baseTileCoordinate + 1;
+        }
+
+        if (latchedDelta == -1 && tileProgress < 1f - preloadFraction)
+        {
+            return baseTileCoordinate - 1;
+        }
+
+        const float movementEpsilon = 0.0005f;
+        if (deltaTile >= movementEpsilon && tileProgress >= 1f - preloadFraction)
+        {
+            return baseTileCoordinate + 1;
+        }
+
+        if (deltaTile <= -movementEpsilon && tileProgress <= preloadFraction)
+        {
+            return baseTileCoordinate - 1;
+        }
+
+        return baseTileCoordinate;
     }
 
     private Transform? ResolveDynamicLoadTarget()
@@ -658,17 +1163,28 @@ public sealed class TileLoader : MonoBehaviour
             return;
         }
 
-        if (!queuedDynamicUnityTileCoordinate.HasValue)
+        if (queuedDynamicUnityTileCoordinates.Count == 0 &&
+            !queuedDynamicUnityTileCoordinate.HasValue)
         {
             return;
         }
 
-        Vector3Int requestedTileCoordinate = queuedDynamicUnityTileCoordinate.Value;
+        if (!TryResolveBestQueuedDynamicTileCoordinate(out Vector3Int requestedTileCoordinate))
+        {
+            queuedDynamicUnityTileCoordinate = null;
+            return;
+        }
+
         if (activeLoadedUnityTileCoordinate.HasValue &&
             activeLoadedUnityTileCoordinate.Value == requestedTileCoordinate &&
             HasGeneratedTerrains())
         {
-            queuedDynamicUnityTileCoordinate = null;
+            queuedDynamicUnityTileCoordinates.Remove(requestedTileCoordinate);
+            if (queuedDynamicUnityTileCoordinate == requestedTileCoordinate)
+            {
+                queuedDynamicUnityTileCoordinate = null;
+            }
+
             return;
         }
 
@@ -690,13 +1206,147 @@ public sealed class TileLoader : MonoBehaviour
             yield break;
         }
 
-        if (!queuedDynamicUnityTileCoordinate.HasValue)
+        if (!TryResolveBestQueuedDynamicTileCoordinate(out Vector3Int requestedTileCoordinate))
         {
             yield break;
         }
 
-        Vector3Int requestedTileCoordinate = queuedDynamicUnityTileCoordinate.Value;
         RequestDynamicTileLoad(requestedTileCoordinate, forceImmediate: true);
+    }
+
+    private void EnqueueDynamicTileLoadRequest(Vector3Int tileCoordinate)
+    {
+        queuedDynamicUnityTileCoordinates.Add(tileCoordinate);
+        queuedDynamicUnityTileCoordinate = tileCoordinate;
+        PruneQueuedDynamicLoadRequests(tileCoordinate);
+    }
+
+    private void PruneQueuedDynamicLoadRequests(Vector3Int preferredTileCoordinate)
+    {
+        if (queuedDynamicUnityTileCoordinates.Count <= 6)
+        {
+            return;
+        }
+
+        TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int playerTileCoordinate);
+        var candidates = new List<Vector3Int>(queuedDynamicUnityTileCoordinates);
+        candidates.Sort((left, right) =>
+            CompareQueuedDynamicTilePriority(left, right, playerTileCoordinate, preferredTileCoordinate));
+        for (int i = 6; i < candidates.Count; i++)
+        {
+            queuedDynamicUnityTileCoordinates.Remove(candidates[i]);
+        }
+    }
+
+    private bool TryResolveBestQueuedDynamicTileCoordinate(out Vector3Int tileCoordinate)
+    {
+        if (queuedDynamicUnityTileCoordinates.Count == 0)
+        {
+            tileCoordinate = queuedDynamicUnityTileCoordinate ?? unityTileCoordinate;
+            return queuedDynamicUnityTileCoordinate.HasValue;
+        }
+
+        Vector3Int preferredTileCoordinate = queuedDynamicUnityTileCoordinate ?? unityTileCoordinate;
+        TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int playerTileCoordinate);
+        bool found = false;
+        Vector3Int bestCoordinate = preferredTileCoordinate;
+        foreach (Vector3Int candidate in queuedDynamicUnityTileCoordinates)
+        {
+            if (!found ||
+                CompareQueuedDynamicTilePriority(candidate, bestCoordinate, playerTileCoordinate, preferredTileCoordinate) < 0)
+            {
+                bestCoordinate = candidate;
+                found = true;
+            }
+        }
+
+        tileCoordinate = bestCoordinate;
+        queuedDynamicUnityTileCoordinate = bestCoordinate;
+        return found;
+    }
+
+    private int CompareQueuedDynamicTilePriority(
+        Vector3Int left,
+        Vector3Int right,
+        Vector3Int playerTileCoordinate,
+        Vector3Int preferredTileCoordinate)
+    {
+        int leftPriority = ScoreQueuedDynamicTilePriority(left, playerTileCoordinate, preferredTileCoordinate);
+        int rightPriority = ScoreQueuedDynamicTilePriority(right, playerTileCoordinate, preferredTileCoordinate);
+        if (leftPriority != rightPriority)
+        {
+            return leftPriority.CompareTo(rightPriority);
+        }
+
+        int preferredDistanceComparison =
+            GetDynamicTileDistance(left, preferredTileCoordinate).CompareTo(GetDynamicTileDistance(right, preferredTileCoordinate));
+        if (preferredDistanceComparison != 0)
+        {
+            return preferredDistanceComparison;
+        }
+
+        return GetDynamicTileDistance(left, playerTileCoordinate).CompareTo(GetDynamicTileDistance(right, playerTileCoordinate));
+    }
+
+    private int ScoreQueuedDynamicTilePriority(
+        Vector3Int candidate,
+        Vector3Int playerTileCoordinate,
+        Vector3Int preferredTileCoordinate)
+    {
+        if (candidate == playerTileCoordinate)
+        {
+            return 0;
+        }
+
+        Vector3Int preferredDelta = new Vector3Int(
+            Math.Sign(preferredTileCoordinate.x - playerTileCoordinate.x),
+            Math.Sign(preferredTileCoordinate.y - playerTileCoordinate.y),
+            0);
+        if (preferredDelta.x != 0 || preferredDelta.y != 0)
+        {
+            Vector3Int frontierCoordinate = new(
+                playerTileCoordinate.x + preferredDelta.x,
+                playerTileCoordinate.y + preferredDelta.y,
+                playerTileCoordinate.z);
+            if (candidate == frontierCoordinate)
+            {
+                return 1;
+            }
+        }
+
+        int score = 10 + GetDynamicTileDistance(candidate, preferredTileCoordinate) * 2;
+        score += GetDynamicTileDistance(candidate, playerTileCoordinate);
+        if (preferredDelta.x != 0 || preferredDelta.y != 0)
+        {
+            int candidateDeltaX = candidate.x - playerTileCoordinate.x;
+            int candidateDeltaY = candidate.y - playerTileCoordinate.y;
+            if ((preferredDelta.x != 0 && Math.Sign(candidateDeltaX) == -preferredDelta.x) ||
+                (preferredDelta.y != 0 && Math.Sign(candidateDeltaY) == -preferredDelta.y))
+            {
+                score += 20;
+            }
+        }
+
+        return score;
+    }
+
+    private static int GetDynamicTileDistance(Vector3Int left, Vector3Int right)
+    {
+        return Math.Abs(left.x - right.x) + Math.Abs(left.y - right.y);
+    }
+
+    private bool TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int tileCoordinate)
+    {
+        Transform? target = ResolveDynamicLoadTarget();
+        if (target != null &&
+            TryGetUnityTileCoordinateForWorldPosition(target.position, out tileCoordinate))
+        {
+            tileCoordinate.z = unityTileCoordinate.z;
+            return true;
+        }
+
+        tileCoordinate = activeLoadedUnityTileCoordinate ?? unityTileCoordinate;
+        return false;
     }
 
     private void ScheduleRuntimeTerrainSeamRebuild()
@@ -771,6 +1421,14 @@ public sealed class TileLoader : MonoBehaviour
             {
                 pendingBatchRoot = CreateGeneratedTerrainBatchRoot(pipelineId);
                 batchState.BatchRoot = pendingBatchRoot;
+            }
+
+            if (doubleBufferedRuntimeSwap)
+            {
+                awaitingDeferredPhaseCompletion = true;
+                activeTerrainLoadCoroutine = StartCoroutine(StreamRuntimeTerrainBatch(batchState));
+                pendingBatchRoot = null;
+                return;
             }
 
             MeasureGenerationPhase(
@@ -854,6 +1512,267 @@ public sealed class TileLoader : MonoBehaviour
                 TryDispatchQueuedDynamicLoad();
             }
         }
+    }
+
+    private IEnumerator StreamRuntimeTerrainBatch(GeneratedTerrainBatchState batchState)
+    {
+        bool completed = false;
+        try
+        {
+            yield return CreateTerrainsOverMultipleFrames(batchState);
+            if (ShouldAbortRuntimeTerrainStreaming(batchState))
+            {
+                yield break;
+            }
+
+            FinalizeTerrainBatchState(batchState);
+            if (batchState.ActiveTerrains.Count == 0)
+            {
+                if (batchState.BatchRoot != null)
+                {
+                    DestroyGeneratedTerrainContainer(batchState.BatchRoot);
+                    batchState.BatchRoot = null;
+                }
+
+                yield break;
+            }
+
+            PrepareDeferredGenerationTargets(batchState);
+            PromoteGeneratedTerrainBatch(batchState);
+            LogGenerationBatchSummary(batchState, "terrain-ready");
+
+            yield return RebuildTerrainSeamsOverMultipleFrames(batchState);
+            if (ShouldAbortRuntimeTerrainStreaming(batchState))
+            {
+                yield break;
+            }
+
+            yield return ApplyTerrainShadingOverMultipleFrames(batchState);
+            if (ShouldAbortRuntimeTerrainStreaming(batchState))
+            {
+                yield break;
+            }
+
+            ScheduleDeferredGenerationPhases(batchState);
+            completed = true;
+        }
+        finally
+        {
+            if (activeTerrainLoadCoroutine != null)
+            {
+                activeTerrainLoadCoroutine = null;
+            }
+
+            if (!completed &&
+                batchState.PipelineId == activeGenerationPipelineId &&
+                activeVegetationPopulationCoroutine == null)
+            {
+                terrainPhaseLoadInProgress = false;
+                TryDispatchQueuedDynamicLoad();
+            }
+        }
+    }
+
+    private bool ShouldAbortRuntimeTerrainStreaming(GeneratedTerrainBatchState batchState)
+    {
+        return this == null || batchState.PipelineId != activeGenerationPipelineId;
+    }
+
+    private IEnumerator CreateTerrainsOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        var totalStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        float frameBudgetMilliseconds = Math.Max(0.25f, terrainCreationBudgetMsPerFrame);
+        int terrainGroupId = GetGeneratedTerrainGroupId();
+        List<GeneratedTerrainRequest> prioritizedRequests = GetTerrainCreationRequestsInPriorityOrder(batchState);
+
+        for (int i = 0; i < prioritizedRequests.Count; i++)
+        {
+            if (ShouldAbortRuntimeTerrainStreaming(batchState))
+            {
+                yield break;
+            }
+
+            GeneratedTerrainRequest request = prioritizedRequests[i];
+            Vector2Int tileCoordinate = GetTileCoordinate(request);
+            if (batchState.TerrainByCoordinate.ContainsKey(tileCoordinate))
+            {
+                continue;
+            }
+
+            GStylizedTerrain terrain = CreateTerrain(
+                request.Layers,
+                request.TerrainObjectName,
+                request.LocalPosition,
+                request.UnityTileX,
+                request.UnityTileY,
+                batchState.NormalizationMinHeight,
+                batchState.NormalizationMaxHeight,
+                request.LocalMinHeight,
+                request.LocalMaxHeight,
+                request.TileHilliness,
+                terrainGroupId,
+                batchState.BatchRoot!);
+            batchState.CreatedTerrains.Add(terrain);
+            batchState.CreatedRequests.Add(request);
+            batchState.TerrainByCoordinate[tileCoordinate] = terrain;
+
+            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            {
+                continue;
+            }
+
+            frameStopwatch.Restart();
+            yield return null;
+        }
+
+        totalStopwatch.Stop();
+        RecordGenerationPhaseTiming(batchState, "terrain creation", totalStopwatch.Elapsed);
+        LogGenerationPhaseTiming("terrain creation", totalStopwatch.Elapsed);
+    }
+
+    private IEnumerator RebuildTerrainSeamsOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        var totalStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        float frameBudgetMilliseconds = Math.Max(0.25f, terrainSeamBudgetMsPerFrame);
+        var terrainChunk = new List<GStylizedTerrain>(1);
+
+        for (int i = 0; i < batchState.ActiveTerrains.Count; i++)
+        {
+            if (ShouldAbortRuntimeTerrainStreaming(batchState))
+            {
+                yield break;
+            }
+
+            GStylizedTerrain terrain = batchState.ActiveTerrains[i];
+            if (terrain == null || terrain.TerrainData == null)
+            {
+                continue;
+            }
+
+            terrainChunk.Clear();
+            terrainChunk.Add(terrain);
+            RebuildTerrainSeams(terrainChunk);
+            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            {
+                continue;
+            }
+
+            frameStopwatch.Restart();
+            yield return null;
+        }
+
+        totalStopwatch.Stop();
+        RecordGenerationPhaseTiming(batchState, "terrain seams", totalStopwatch.Elapsed);
+        LogGenerationPhaseTiming("terrain seams", totalStopwatch.Elapsed);
+    }
+
+    private IEnumerator ApplyTerrainShadingOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        var totalStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        float frameBudgetMilliseconds = Math.Max(0.25f, terrainShadingBudgetMsPerFrame);
+        var terrainChunk = new List<GStylizedTerrain>(1);
+
+        for (int i = 0; i < batchState.ActiveTerrains.Count; i++)
+        {
+            if (ShouldAbortRuntimeTerrainStreaming(batchState))
+            {
+                yield break;
+            }
+
+            GStylizedTerrain terrain = batchState.ActiveTerrains[i];
+            if (terrain == null || terrain.TerrainData == null)
+            {
+                continue;
+            }
+
+            terrainChunk.Clear();
+            terrainChunk.Add(terrain);
+            ApplyTerrainShading(terrainChunk);
+            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            {
+                continue;
+            }
+
+            frameStopwatch.Restart();
+            yield return null;
+        }
+
+        totalStopwatch.Stop();
+        RecordGenerationPhaseTiming(batchState, "terrain shading", totalStopwatch.Elapsed);
+        LogGenerationPhaseTiming("terrain shading", totalStopwatch.Elapsed);
+    }
+
+    private List<GeneratedTerrainRequest> GetTerrainCreationRequestsInPriorityOrder(GeneratedTerrainBatchState batchState)
+    {
+        var requests = new List<GeneratedTerrainRequest>(batchState.Requests.Count);
+        for (int i = 0; i < batchState.Requests.Count; i++)
+        {
+            requests.Add(batchState.Requests[i]);
+        }
+
+        if (!Application.isPlaying || !dynamicTileLoadingEnabled)
+        {
+            return requests;
+        }
+
+        TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int playerTileCoordinate);
+        Vector2Int playerTile = new(playerTileCoordinate.x, playerTileCoordinate.y);
+        Vector2Int centerTile = new(batchState.CenterTileCoordinate.x, batchState.CenterTileCoordinate.y);
+        Vector2Int preferredFrontier = new(
+            playerTile.x + Math.Sign(centerTile.x - playerTile.x),
+            playerTile.y + Math.Sign(centerTile.y - playerTile.y));
+        requests.Sort((left, right) =>
+            CompareTerrainCreationPriority(left, right, playerTile, centerTile, preferredFrontier));
+        return requests;
+    }
+
+    private int CompareTerrainCreationPriority(
+        GeneratedTerrainRequest left,
+        GeneratedTerrainRequest right,
+        Vector2Int playerTile,
+        Vector2Int centerTile,
+        Vector2Int preferredFrontier)
+    {
+        int leftPriority = ScoreTerrainCreationPriority(GetTileCoordinate(left), playerTile, centerTile, preferredFrontier);
+        int rightPriority = ScoreTerrainCreationPriority(GetTileCoordinate(right), playerTile, centerTile, preferredFrontier);
+        if (leftPriority != rightPriority)
+        {
+            return leftPriority.CompareTo(rightPriority);
+        }
+
+        return GetDynamicTileDistance(
+            new Vector3Int(left.UnityTileX, left.UnityTileY, 0),
+            new Vector3Int(centerTile.x, centerTile.y, 0))
+            .CompareTo(GetDynamicTileDistance(
+                new Vector3Int(right.UnityTileX, right.UnityTileY, 0),
+                new Vector3Int(centerTile.x, centerTile.y, 0)));
+    }
+
+    private static int ScoreTerrainCreationPriority(
+        Vector2Int tileCoordinate,
+        Vector2Int playerTile,
+        Vector2Int centerTile,
+        Vector2Int preferredFrontier)
+    {
+        if (tileCoordinate == playerTile)
+        {
+            return 0;
+        }
+
+        if (tileCoordinate == preferredFrontier)
+        {
+            return 1;
+        }
+
+        if (tileCoordinate == centerTile)
+        {
+            return 2;
+        }
+
+        return 10 + Mathf.Abs(tileCoordinate.x - centerTile.x) + Mathf.Abs(tileCoordinate.y - centerTile.y);
     }
 
     private LoadedWorldData GetOrLoadCachedWorldData(string filePath)
@@ -1263,8 +2182,8 @@ public sealed class TileLoader : MonoBehaviour
                     "vegetation placement",
                     () =>
                     {
-                        ClearGeneratedVegetationOutputs(batchState.VegetationRefreshTerrains);
                         PopulateVegetationImmediately(batchState);
+                        FinalizeVegetationClearOnlyTerrains(batchState);
                     });
                 FinishDeferredGenerationPhases(batchState);
                 return;
@@ -1365,6 +2284,9 @@ public sealed class TileLoader : MonoBehaviour
             UpdateConiferOptimization(forceFullIfNoTarget: true);
         }
 
+        lastVegetationStreamingTargetWorldPosition =
+            batchState.VegetationStreamingTargetWorldPosition ??
+            ResolveVegetationStreamingTargetWorldPosition();
         lastCompletedGenerationPipelineId = batchState.PipelineId;
         LogGenerationBatchSummary(batchState, "complete");
         terrainPhaseLoadInProgress = false;
@@ -1382,6 +2304,7 @@ public sealed class TileLoader : MonoBehaviour
         {
             double elapsedMilliseconds = activeVegetationPopulationStopwatch?.Elapsed.TotalMilliseconds ?? 0d;
             InterruptAndLogPendingVegetationTileStats(activeVegetationPopulationBatchState, elapsedMilliseconds);
+            DiscardPendingVegetationBuildOutputs(activeVegetationPopulationBatchState);
         }
 
         StopCoroutine(activeVegetationPopulationCoroutine);
@@ -1407,27 +2330,6 @@ public sealed class TileLoader : MonoBehaviour
             if (riverContainer != null)
             {
                 RetireGeneratedContainer(riverContainer);
-            }
-        }
-    }
-
-    private void ClearGeneratedVegetationOutputs(IReadOnlyList<GStylizedTerrain> terrains)
-    {
-        string containerName = string.IsNullOrWhiteSpace(generatedVegetationContainerName)
-            ? "Vegetation"
-            : generatedVegetationContainerName.Trim();
-        for (int i = 0; i < terrains.Count; i++)
-        {
-            GStylizedTerrain terrain = terrains[i];
-            if (terrain == null)
-            {
-                continue;
-            }
-
-            Transform vegetationContainer = terrain.transform.Find(containerName);
-            if (vegetationContainer != null)
-            {
-                RetireGeneratedContainer(vegetationContainer);
             }
         }
     }
@@ -1470,6 +2372,7 @@ public sealed class TileLoader : MonoBehaviour
             $"activeTiles={batchState.ActiveTerrains.Count}, createdTiles={batchState.CreatedTerrains.Count}, reusedTiles={batchState.ReusedTerrainCount}, " +
             $"removedTiles={batchState.RemovedTerrainCount}, reusedWorldgenTiles={batchState.ReusedRequestCount}, " +
             $"riverRefreshTiles={batchState.RiverRefreshTerrains.Count}, vegetationRefreshTiles={batchState.VegetationRefreshTerrains.Count}, " +
+            $"surfaceTileCachesBuilt={batchState.PlayerCentricSurfaceTileCacheBuildCount}, surfaceCellsBuilt={batchState.PlayerCentricSurfaceCellBuildCount}, surfacePlacements={batchState.PlayerCentricSurfacePlacementCount}, " +
             $"vegGenerated={batchState.VegetationGeneratedPlacementCount}, vegKept={batchState.VegetationKeptPlacementCount}, " +
             $"vegSkippedPolicy={batchState.VegetationSkippedByPolicyCount}, vegSkippedDistance={batchState.VegetationSkippedByDistanceCount}, vegSkippedCap={batchState.VegetationSkippedByCapCount}, " +
             $"vegQueuedPlacements={batchState.VegetationQueuedPlacementCount}, vegWorkItems={batchState.VegetationQueuedWorkItemCount}, " +
@@ -1478,6 +2381,7 @@ public sealed class TileLoader : MonoBehaviour
             $"vegDeferredFinalizes={batchState.VegetationDeferredRendererFinalizeCount}, vegRendererFinalizes={batchState.VegetationRendererFinalizeCount}, " +
             $"queuePrepCpuMs={batchState.VegetationQueuePrepCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"placementCpuMs={batchState.VegetationPlacementCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"surfaceSourceBuildCpuMs={batchState.PlayerCentricSurfaceSourceBuildCpuMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"prototypeCacheHits={batchState.VegetationPrototypeCacheHitCount}, prototypeCacheMisses={batchState.VegetationPrototypeCacheMissCount}, " +
             $"forcedInstancingOnly={batchState.VegetationForcedInstancingOnlyCount}, rendererInits={batchState.VegetationRendererInitializationCount}, " +
             $"prefabResolveMs={batchState.VegetationPrefabResolveMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
@@ -1489,7 +2393,9 @@ public sealed class TileLoader : MonoBehaviour
             $"heightmapSamples={batchState.VegetationHeightmapSampleCount}, raycastSamples={batchState.VegetationRaycastSampleCount}, " +
             $"centerReadyMs={batchState.VegetationCenterReadyMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
             $"fullSettledMs={batchState.VegetationFullSettledMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
-            $"missingPrefabs={batchState.VegetationMissingPrefabCount}, " +
+            $"surfaceActiveCells={batchState.PlayerCentricSurfaceActiveCellCount}, surfaceActivatedCells={batchState.PlayerCentricSurfaceActivatedCellCount}, surfaceDeactivatedCells={batchState.PlayerCentricSurfaceDeactivatedCellCount}, " +
+            $"surfaceFirstVisibleMs={batchState.PlayerCentricSurfaceFirstVisibleMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, surfaceSettledMs={batchState.PlayerCentricSurfaceFullSettledMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, " +
+            $"missingPrefabs={batchState.VegetationMissingPrefabCount}, surfaceMissingPrefabs={batchState.PlayerCentricSurfaceMissingPrefabCount}, " +
             $"queueBuckets=[{FormatBucketSummary(batchState.VegetationQueuedPlacementsByBucket, batchState.VegetationQueuedWorkItemsByBucket, 6)}].",
             this);
 
@@ -1760,6 +2666,7 @@ public sealed class TileLoader : MonoBehaviour
         generatedTerrainShadingMetadata.Clear();
         nextConiferOptimizationTime = 0f;
         activeTerrainTileCache.Clear();
+        ClearPlayerCentricSurfaceCaches();
         activeTerrainTileCacheSignature = null;
         lastCompletedGenerationPipelineId = 0;
         DestroyAllGeneratedTerrainContainers(exceptRoot: null);
@@ -1843,11 +2750,21 @@ public sealed class TileLoader : MonoBehaviour
         batchRoot.localRotation = Quaternion.identity;
         batchRoot.localScale = Vector3.one;
         batchState.BatchRoot = batchRoot;
+        HashSet<Vector2Int> protectedCoordinates = GetProtectedRuntimeTileCoordinates(batchState.CenterTileCoordinate);
 
         foreach (KeyValuePair<Vector2Int, GStylizedTerrain> pair in existingTerrains)
         {
             if (desiredCoordinates.Contains(pair.Key))
             {
+                continue;
+            }
+
+            if (protectedCoordinates.Contains(pair.Key))
+            {
+                pair.Value.transform.SetParent(batchRoot, false);
+                pair.Value.transform.localPosition = GetTerrainLocalPositionRelativeToBatchCenter(pair.Key, batchState.CenterTileCoordinate);
+                pair.Value.transform.localRotation = Quaternion.identity;
+                pair.Value.transform.localScale = Vector3.one;
                 continue;
             }
 
@@ -1876,6 +2793,47 @@ public sealed class TileLoader : MonoBehaviour
         return batchState.ReusedTerrainCount > 0;
     }
 
+    private HashSet<Vector2Int> GetProtectedRuntimeTileCoordinates(Vector3Int requestedCenterTileCoordinate)
+    {
+        var protectedCoordinates = new HashSet<Vector2Int>();
+        if (!Application.isPlaying || !dynamicTileLoadingEnabled)
+        {
+            return protectedCoordinates;
+        }
+
+        if (!TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int playerTileCoordinate))
+        {
+            playerTileCoordinate = activeLoadedUnityTileCoordinate ?? requestedCenterTileCoordinate;
+        }
+
+        for (int offsetY = -1; offsetY <= 1; offsetY++)
+        {
+            for (int offsetX = -1; offsetX <= 1; offsetX++)
+            {
+                protectedCoordinates.Add(new Vector2Int(
+                    playerTileCoordinate.x + offsetX,
+                    playerTileCoordinate.y + offsetY));
+            }
+        }
+
+        Vector2Int requestedCenter = new(requestedCenterTileCoordinate.x, requestedCenterTileCoordinate.y);
+        Vector2Int playerTile = new(playerTileCoordinate.x, playerTileCoordinate.y);
+        Vector2Int forwardTile = new(
+            playerTile.x + Math.Sign(requestedCenter.x - playerTile.x),
+            playerTile.y + Math.Sign(requestedCenter.y - playerTile.y));
+        protectedCoordinates.Add(playerTile);
+        protectedCoordinates.Add(forwardTile);
+        return protectedCoordinates;
+    }
+
+    private Vector3 GetTerrainLocalPositionRelativeToBatchCenter(Vector2Int tileCoordinate, Vector3Int centerTileCoordinate)
+    {
+        return new Vector3(
+            (tileCoordinate.x - centerTileCoordinate.x) * terrainWidth,
+            0f,
+            (tileCoordinate.y - centerTileCoordinate.y) * terrainLength);
+    }
+
     private void FinalizeTerrainBatchState(GeneratedTerrainBatchState batchState)
     {
         batchState.ActiveTerrains.Clear();
@@ -1896,6 +2854,7 @@ public sealed class TileLoader : MonoBehaviour
         batchState.RiverRefreshTerrains.Clear();
         batchState.VegetationRefreshRequests.Clear();
         batchState.VegetationRefreshTerrains.Clear();
+        batchState.VegetationStreamingTargetWorldPosition = ResolveVegetationStreamingTargetWorldPosition();
 
         bool refreshAllTiles =
             batchState.ReusedTerrainCount == 0 ||
@@ -1930,13 +2889,6 @@ public sealed class TileLoader : MonoBehaviour
 
             if (activeLoadedUnityTileCoordinate.HasValue)
             {
-                Vector2Int previousCenterTileCoordinate = new(
-                    activeLoadedUnityTileCoordinate.Value.x,
-                    activeLoadedUnityTileCoordinate.Value.y);
-                Vector2Int currentCenterTileCoordinate = new(
-                    batchState.CenterTileCoordinate.x,
-                    batchState.CenterTileCoordinate.y);
-
                 for (int i = 0; i < batchState.Requests.Count; i++)
                 {
                     Vector2Int tileCoordinate = GetTileCoordinate(batchState.Requests[i]);
@@ -1947,8 +2899,8 @@ public sealed class TileLoader : MonoBehaviour
 
                     if (ShouldRefreshReusedVegetationTileForStreaming(
                             tileCoordinate,
-                            previousCenterTileCoordinate,
-                            currentCenterTileCoordinate))
+                            lastVegetationStreamingTargetWorldPosition,
+                            batchState.VegetationStreamingTargetWorldPosition))
                     {
                         vegetationRefreshTiles.Add(tileCoordinate);
                     }
@@ -1979,14 +2931,97 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
-    private static bool ShouldRefreshReusedVegetationTileForStreaming(
+    private bool ShouldRefreshReusedVegetationTileForStreaming(
         Vector2Int tileCoordinate,
-        Vector2Int previousCenterTileCoordinate,
-        Vector2Int currentCenterTileCoordinate)
+        Vector3? previousStreamingTargetWorldPosition,
+        Vector3? currentStreamingTargetWorldPosition)
     {
-        bool wasCenterTile = tileCoordinate == previousCenterTileCoordinate;
-        bool isCenterTile = tileCoordinate == currentCenterTileCoordinate;
-        return wasCenterTile != isCenterTile;
+        VegetationTileRadiusState previousState = GetVegetationTileRadiusState(tileCoordinate, previousStreamingTargetWorldPosition);
+        VegetationTileRadiusState currentState = GetVegetationTileRadiusState(tileCoordinate, currentStreamingTargetWorldPosition);
+        if (previousState.IntersectsHighRadius != currentState.IntersectsHighRadius ||
+            previousState.IntersectsMidRadius != currentState.IntersectsMidRadius)
+        {
+            return true;
+        }
+
+        if (!HasVegetationStreamingTargetMovedEnough(
+                previousStreamingTargetWorldPosition,
+                currentStreamingTargetWorldPosition))
+        {
+            return false;
+        }
+
+        return previousState.IntersectsHighRadius ||
+               previousState.IntersectsMidRadius ||
+               currentState.IntersectsHighRadius ||
+               currentState.IntersectsMidRadius;
+    }
+
+    private VegetationTileRadiusState GetVegetationTileRadiusState(Vector2Int tileCoordinate, Vector3? targetWorldPosition)
+    {
+        if (!targetWorldPosition.HasValue)
+        {
+            return default;
+        }
+
+        return new VegetationTileRadiusState(
+            DoesTileIntersectVegetationRadius(tileCoordinate, targetWorldPosition.Value, highDetailPlacementRadiusMeters),
+            DoesTileIntersectVegetationRadius(tileCoordinate, targetWorldPosition.Value, midDetailPlacementRadiusMeters));
+    }
+
+    private bool DoesTileIntersectVegetationRadius(Vector2Int tileCoordinate, Vector3 targetWorldPosition, float radiusMeters)
+    {
+        if (radiusMeters <= 0f)
+        {
+            return false;
+        }
+
+        Vector3 localPosition = transform.InverseTransformPoint(targetWorldPosition);
+        float minX = tileCoordinate.x * terrainWidth;
+        float maxX = minX + terrainWidth;
+        float minZ = tileCoordinate.y * terrainLength;
+        float maxZ = minZ + terrainLength;
+        float deltaX = localPosition.x < minX ? minX - localPosition.x : localPosition.x > maxX ? localPosition.x - maxX : 0f;
+        float deltaZ = localPosition.z < minZ ? minZ - localPosition.z : localPosition.z > maxZ ? localPosition.z - maxZ : 0f;
+        return deltaX * deltaX + deltaZ * deltaZ <= radiusMeters * radiusMeters;
+    }
+
+    private bool HasVegetationStreamingTargetMovedEnough(
+        Vector3? previousStreamingTargetWorldPosition,
+        Vector3? currentStreamingTargetWorldPosition)
+    {
+        if (!previousStreamingTargetWorldPosition.HasValue || !currentStreamingTargetWorldPosition.HasValue)
+        {
+            return false;
+        }
+
+        float minimumRefreshDistance = ResolveVegetationStreamingRefreshDistance();
+        if (minimumRefreshDistance <= 0f)
+        {
+            return false;
+        }
+
+        return (currentStreamingTargetWorldPosition.Value - previousStreamingTargetWorldPosition.Value).sqrMagnitude >=
+               minimumRefreshDistance * minimumRefreshDistance;
+    }
+
+    private float ResolveVegetationStreamingRefreshDistance()
+    {
+        float safeTileExtent = Mathf.Max(1f, Mathf.Min(terrainWidth, terrainLength));
+        float nearRadius = Mathf.Max(1f, highDetailPlacementRadiusMeters);
+        return Mathf.Max(4f, Mathf.Min(nearRadius * 0.5f, safeTileExtent * 0.2f));
+    }
+
+    private readonly struct VegetationTileRadiusState
+    {
+        public VegetationTileRadiusState(bool intersectsHighRadius, bool intersectsMidRadius)
+        {
+            IntersectsHighRadius = intersectsHighRadius;
+            IntersectsMidRadius = intersectsMidRadius;
+        }
+
+        public bool IntersectsHighRadius { get; }
+        public bool IntersectsMidRadius { get; }
     }
 
     private Dictionary<Vector2Int, GStylizedTerrain> GetGeneratedTerrainsByTileCoordinate(
@@ -2027,6 +3062,7 @@ public sealed class TileLoader : MonoBehaviour
             return;
         }
 
+        var previousTileCache = new Dictionary<Vector2Int, GeneratedTerrainTileData>(activeTerrainTileCache);
         activeGeneratedTerrainRoot = batchState.BatchRoot;
         activeLoadedUnityTileCoordinate = unityTileCoordinate;
         activeTerrainTileCache.Clear();
@@ -2042,7 +3078,22 @@ public sealed class TileLoader : MonoBehaviour
                 request.TileHilliness);
         }
 
+        Dictionary<Vector2Int, GStylizedTerrain> retainedTerrains = GetGeneratedTerrainsByTileCoordinate(
+            batchState.BatchRoot,
+            batchState.CenterTileCoordinate);
+        foreach (KeyValuePair<Vector2Int, GStylizedTerrain> pair in retainedTerrains)
+        {
+            if (activeTerrainTileCache.ContainsKey(pair.Key) ||
+                !previousTileCache.TryGetValue(pair.Key, out GeneratedTerrainTileData tileData))
+            {
+                continue;
+            }
+
+            activeTerrainTileCache[pair.Key] = tileData;
+        }
+
         activeTerrainTileCacheSignature = batchState.CacheSignature;
+        PrunePlayerCentricSurfaceTileCaches(activeTerrainTileCache.Keys);
         DestroyAllGeneratedTerrainContainers(exceptRoot: batchState.BatchRoot);
     }
 
@@ -2093,6 +3144,8 @@ public sealed class TileLoader : MonoBehaviour
         {
             return;
         }
+
+        RemovePlayerCentricSurfaceCachesOwnedByContainer(container);
 
         if (Application.isPlaying)
         {
@@ -2441,12 +3494,303 @@ public sealed class TileLoader : MonoBehaviour
             });
     }
 
+    private void EnsurePlayerCentricSurfaceCaches(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch)
+    {
+        if (!ShouldUsePlayerCentricSurfaceVegetation())
+        {
+            return;
+        }
+
+        var sourceBuildStopwatch = Stopwatch.StartNew();
+        int builtTileCacheCount = 0;
+        int builtCellCount = 0;
+        int builtPlacementCount = 0;
+        for (int i = 0; i < batchState.Requests.Count; i++)
+        {
+            GeneratedTerrainRequest request = batchState.Requests[i];
+            Vector2Int tileCoordinate = GetTileCoordinate(request);
+            if (!batchState.TerrainByCoordinate.TryGetValue(tileCoordinate, out GStylizedTerrain terrain) || terrain == null)
+            {
+                continue;
+            }
+
+            IReadOnlyList<TileObjectPlacement> placedObjects = request.Layers.PlacedObjects ?? Array.Empty<TileObjectPlacement>();
+            bool hasSurfacePlacements = false;
+            for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
+            {
+                if (IsPlayerCentricSurfaceTier(placedObjects[placementIndex].Definition.StreamingTier))
+                {
+                    hasSurfacePlacements = true;
+                    break;
+                }
+            }
+
+            if (!hasSurfacePlacements)
+            {
+                RemovePlayerCentricSurfaceTileCache(tileCoordinate);
+                continue;
+            }
+
+            int terrainInstanceId = terrain.GetInstanceID();
+            if (playerCentricSurfaceTileCaches.TryGetValue(tileCoordinate, out PlayerCentricSurfaceTileCache? existingCache) &&
+                existingCache.CacheSignature == ResolvePlayerCentricSurfaceCacheSignature(batchState.CacheSignature) &&
+                existingCache.TerrainInstanceId == terrainInstanceId &&
+                existingCache.Terrain == terrain)
+            {
+                playerCentricSurfaceTileByTerrainInstanceId[terrainInstanceId] = tileCoordinate;
+                continue;
+            }
+
+            RemovePlayerCentricSurfaceTileCache(tileCoordinate);
+            PlayerCentricSurfaceTileCache? rebuiltCache = BuildPlayerCentricSurfaceTileCache(batchState, terrain, request);
+            if (rebuiltCache == null)
+            {
+                continue;
+            }
+
+            playerCentricSurfaceTileCaches[tileCoordinate] = rebuiltCache;
+            playerCentricSurfaceTileByTerrainInstanceId[rebuiltCache.TerrainInstanceId] = tileCoordinate;
+            builtTileCacheCount++;
+            builtCellCount += rebuiltCache.CellKeys.Count;
+            foreach (PlayerCentricSurfaceCellKey cellKey in rebuiltCache.CellKeys)
+            {
+                if (playerCentricSurfaceCellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? cellSource))
+                {
+                    builtPlacementCount += cellSource.PlacementCount;
+                }
+            }
+        }
+
+        sourceBuildStopwatch.Stop();
+        batchState.PlayerCentricSurfaceTileCacheBuildCount += builtTileCacheCount;
+        batchState.PlayerCentricSurfaceCellBuildCount += builtCellCount;
+        batchState.PlayerCentricSurfacePlacementCount += builtPlacementCount;
+        batchState.PlayerCentricSurfaceSourceBuildCpuMilliseconds += sourceBuildStopwatch.Elapsed.TotalMilliseconds;
+        RecordGenerationPhaseTiming(batchState, "player-centric surface source build", sourceBuildStopwatch.Elapsed);
+        if (sourceBuildStopwatch.Elapsed.TotalMilliseconds > 0d)
+        {
+            LogGenerationPhaseTiming("player-centric surface source build", sourceBuildStopwatch.Elapsed);
+        }
+
+        UpdatePlayerCentricSurfaceVegetation(forceImmediate: true, batchState, totalStopwatch);
+    }
+
+    private PlayerCentricSurfaceTileCache? BuildPlayerCentricSurfaceTileCache(
+        GeneratedTerrainBatchState batchState,
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request)
+    {
+        List<PreparedVegetationPlacement> preparedPlacements = PreparePlayerCentricSurfacePlacementsForRequest(
+            batchState,
+            terrain,
+            request);
+        if (preparedPlacements.Count == 0)
+        {
+            return null;
+        }
+
+        Vector2Int tileCoordinate = GetTileCoordinate(request);
+        var tileCache = new PlayerCentricSurfaceTileCache(
+            tileCoordinate,
+            ResolvePlayerCentricSurfaceCacheSignature(batchState.CacheSignature),
+            terrain);
+        var buildState = new HybridVegetationBuildState(
+            null,
+            terrain,
+            request,
+            existingVegetationContainer: null,
+            batchState.NormalizationMinHeight,
+            batchState.NormalizationMaxHeight);
+
+        for (int placementIndex = 0; placementIndex < preparedPlacements.Count; placementIndex++)
+        {
+            PreparedVegetationPlacement preparedPlacement = preparedPlacements[placementIndex];
+            TileObjectPlacement placement = preparedPlacement.Placement;
+            GameObject? prefab = LoadPrefabForPlacement(placement, batchState);
+            if (prefab == null)
+            {
+                batchState.PlayerCentricSurfaceMissingPrefabCount++;
+                continue;
+            }
+
+            bool isTreeObject = IsTreePlacement(placement, prefab);
+            if (isTreeObject)
+            {
+                continue;
+            }
+
+            TileLoaderInstancedVegetationPrototype? prototype = GetOrCreateVegetationPrototype(
+                null,
+                placement,
+                prefab,
+                isTreeObject: false,
+                supportsPromotion: false);
+            if (prototype == null ||
+                !TryBuildPlayerCentricSurfaceInstancedPlacement(
+                    buildState,
+                    preparedPlacement,
+                    out TileLoaderInstancedVegetationPlacement instancedPlacement))
+            {
+                continue;
+            }
+
+            PlayerCentricSurfaceCellKey cellKey = ResolvePlayerCentricSurfaceCellKey(preparedPlacement.Geometry.WorldPosition);
+            if (!playerCentricSurfaceCellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? cellSource))
+            {
+                cellSource = new PlayerCentricSurfaceCellSource(cellKey, tileCoordinate, terrain);
+                playerCentricSurfaceCellSources[cellKey] = cellSource;
+            }
+
+            cellSource.Terrain = terrain;
+            tileCache.CellKeys.Add(cellKey);
+            if (!cellSource.PrototypeIndices.TryGetValue(prototype.Key, out int prototypeIndex))
+            {
+                prototypeIndex = cellSource.Prototypes.Count;
+                cellSource.PrototypeIndices[prototype.Key] = prototypeIndex;
+                cellSource.Prototypes.Add(prototype);
+            }
+
+            cellSource.Placements.Add(new TileLoaderInstancedVegetationPlacement(
+                prototypeIndex,
+                instancedPlacement.LocalPosition,
+                instancedPlacement.LocalRotation,
+                instancedPlacement.LocalScale,
+                conformToTerrainOnPromotion: false,
+                instancedPlacement.SurfaceSampleLocalX,
+                instancedPlacement.SurfaceSampleLocalZ,
+                instancedPlacement.SurfaceVerticalOffset,
+                instancedPlacement.SurfaceNormalOffset));
+        }
+
+        if (tileCache.CellKeys.Count == 0)
+        {
+            return null;
+        }
+
+        return tileCache;
+    }
+
+    private List<PreparedVegetationPlacement> PreparePlayerCentricSurfacePlacementsForRequest(
+        GeneratedTerrainBatchState batchState,
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request)
+    {
+        var preparedPlacements = new List<PreparedVegetationPlacement>();
+        var cappedPlacements = new Dictionary<int, List<PreparedVegetationPlacement>>();
+        Vector2Int tileCoordinate = GetTileCoordinate(request);
+        bool isCenterTile = tileCoordinate == new Vector2Int(batchState.CenterTileCoordinate.x, batchState.CenterTileCoordinate.y);
+        IReadOnlyList<TileObjectPlacement> placedObjects = request.Layers.PlacedObjects ?? Array.Empty<TileObjectPlacement>();
+
+        for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
+        {
+            TileObjectPlacement placement = placedObjects[placementIndex];
+            TileObjectStreamingTier streamingTier = placement.Definition.StreamingTier;
+            if (!IsPlayerCentricSurfaceTier(streamingTier))
+            {
+                continue;
+            }
+
+            ulong stableHash = ComputeStablePlacementHash(request, placement);
+            if (!TryBuildPreparedPlacementGeometry(
+                    batchState,
+                    tileStats: null,
+                    terrain,
+                    request,
+                    placement,
+                    isTreePlacement: false,
+                    enforceCurrentStreamingDistance: false,
+                    out PreparedPlacementGeometry geometry))
+            {
+                continue;
+            }
+
+            var preparedPlacement = new PreparedVegetationPlacement(
+                placement,
+                stableHash,
+                isCenterTile,
+                VegetationPriorityBucket.CenterClutterAndGround,
+                forceInstancingOnly: true,
+                geometry);
+            int? maxPlacementsPerTile = placement.Definition.MaxPlacementsPerTile;
+            if (maxPlacementsPerTile.HasValue)
+            {
+                if (!cappedPlacements.TryGetValue(placement.Definition.NumericId, out List<PreparedVegetationPlacement>? entries))
+                {
+                    entries = new List<PreparedVegetationPlacement>();
+                    cappedPlacements[placement.Definition.NumericId] = entries;
+                }
+
+                entries.Add(preparedPlacement);
+                continue;
+            }
+
+            preparedPlacements.Add(preparedPlacement);
+        }
+
+        foreach (KeyValuePair<int, List<PreparedVegetationPlacement>> entry in cappedPlacements)
+        {
+            List<PreparedVegetationPlacement> definitionPlacements = entry.Value;
+            definitionPlacements.Sort((left, right) => left.StableHash.CompareTo(right.StableHash));
+            int keepCount = definitionPlacements.Count == 0
+                ? 0
+                : Math.Min(
+                    definitionPlacements[0].Placement.Definition.MaxPlacementsPerTile ?? definitionPlacements.Count,
+                    definitionPlacements.Count);
+            for (int i = 0; i < keepCount; i++)
+            {
+                preparedPlacements.Add(definitionPlacements[i]);
+            }
+        }
+
+        preparedPlacements.Sort((left, right) => left.StableHash.CompareTo(right.StableHash));
+        PopulatePreparedPlacementGeometryNormals(batchState, tileStats: null, request, preparedPlacements);
+        return preparedPlacements;
+    }
+
+    private bool TryBuildPlayerCentricSurfaceInstancedPlacement(
+        HybridVegetationBuildState buildState,
+        PreparedVegetationPlacement preparedPlacement,
+        out TileLoaderInstancedVegetationPlacement instancedPlacement)
+    {
+        instancedPlacement = default;
+        Vector3 localPosition = preparedPlacement.Geometry.LocalPosition;
+        Vector3 localNormal = preparedPlacement.Geometry.LocalNormal;
+        if (TrySampleGeneratedTerrainSurface(
+                buildState.Terrain,
+                preparedPlacement.Geometry.LocalPosition.x,
+                preparedPlacement.Geometry.LocalPosition.z,
+                surfaceObjectVerticalOffset,
+                out Vector3 exactLocalSurfacePoint,
+                out Vector3 exactLocalSurfaceNormal))
+        {
+            localPosition = exactLocalSurfacePoint;
+            localNormal = exactLocalSurfaceNormal;
+        }
+
+        Quaternion localRotation = Quaternion.FromToRotation(Vector3.up, localNormal);
+        localPosition += localNormal * GetSurfaceObjectOffset();
+        instancedPlacement = new TileLoaderInstancedVegetationPlacement(
+            prototypeIndex: 0,
+            localPosition,
+            localRotation,
+            Vector3.one,
+            conformToTerrainOnPromotion: false,
+            preparedPlacement.Geometry.LocalPosition.x,
+            preparedPlacement.Geometry.LocalPosition.z,
+            surfaceObjectVerticalOffset,
+            GetSurfaceObjectOffset());
+        return true;
+    }
+
     private void PopulateVegetationImmediately(GeneratedTerrainBatchState batchState)
     {
         if (!placeTreeObjects && !placeSurfaceObjects)
         {
             return;
         }
+
+        var totalStopwatch = Stopwatch.StartNew();
+        EnsurePlayerCentricSurfaceCaches(batchState, totalStopwatch);
 
         int terrainCount = Math.Min(batchState.VegetationRefreshRequests.Count, batchState.VegetationRefreshTerrains.Count);
         if (UsesLegacyVegetationObjects())
@@ -2468,7 +3812,6 @@ public sealed class TileLoader : MonoBehaviour
             return;
         }
 
-        var totalStopwatch = Stopwatch.StartNew();
         var queuePrepStopwatch = Stopwatch.StartNew();
         List<VegetationWorkItem> workItems = PrepareVegetationWorkItems(batchState, totalStopwatch);
         queuePrepStopwatch.Stop();
@@ -2496,8 +3839,7 @@ public sealed class TileLoader : MonoBehaviour
         var totalStopwatch = Stopwatch.StartNew();
         try
         {
-            ClearGeneratedVegetationOutputs(batchState.VegetationRefreshTerrains);
-
+            EnsurePlayerCentricSurfaceCaches(batchState, totalStopwatch);
             var queuePrepStopwatch = Stopwatch.StartNew();
             List<VegetationWorkItem> workItems = PrepareVegetationWorkItems(batchState, totalStopwatch);
             queuePrepStopwatch.Stop();
@@ -2542,6 +3884,7 @@ public sealed class TileLoader : MonoBehaviour
 
             totalStopwatch.Stop();
             batchState.VegetationFullSettledMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
+            FinalizeVegetationClearOnlyTerrains(batchState);
             FinalizeAndLogPendingVegetationTileStats(batchState, batchState.VegetationFullSettledMilliseconds);
             completed = true;
         }
@@ -2571,12 +3914,24 @@ public sealed class TileLoader : MonoBehaviour
         var orderedWorkItems = new List<VegetationWorkItem>();
         var workItemsByBucket = new Dictionary<VegetationPriorityBucket, List<VegetationWorkItem>>();
         batchState.VegetationStreamingTargetWorldPosition = ResolveVegetationStreamingTargetWorldPosition();
+        batchState.VegetationClearOnlyTerrains.Clear();
         int terrainCount = Math.Min(batchState.VegetationRefreshRequests.Count, batchState.VegetationRefreshTerrains.Count);
         for (int i = 0; i < terrainCount; i++)
         {
             GeneratedTerrainRequest request = batchState.VegetationRefreshRequests[i];
             GStylizedTerrain terrain = batchState.VegetationRefreshTerrains[i];
             Vector2Int tileCoordinate = GetTileCoordinate(request);
+            Transform? existingVegetationContainer = FindVegetationContainer(terrain.transform);
+            if (request.Layers.PlacedObjects == null || request.Layers.PlacedObjects.Count == 0)
+            {
+                if (existingVegetationContainer != null)
+                {
+                    batchState.VegetationClearOnlyTerrains.Add(terrain);
+                }
+
+                continue;
+            }
+
             HybridVegetationBuildState? buildState = BeginHybridVegetationBuild(
                 batchState,
                 terrain,
@@ -2595,6 +3950,11 @@ public sealed class TileLoader : MonoBehaviour
                 request);
             if (preparedPlacements.Count == 0)
             {
+                if (existingVegetationContainer != null)
+                {
+                    batchState.VegetationClearOnlyTerrains.Add(terrain);
+                }
+
                 continue;
             }
 
@@ -2731,6 +4091,12 @@ public sealed class TileLoader : MonoBehaviour
         for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
         {
             TileObjectPlacement placement = placedObjects[placementIndex];
+            TileObjectStreamingTier streamingTier = placement.Definition.StreamingTier;
+            if (ShouldUsePlayerCentricSurfaceVegetation() && IsPlayerCentricSurfaceTier(streamingTier))
+            {
+                continue;
+            }
+
             string categoryName = GetPlacementCategoryName(placement);
             tileStats.RecordGenerated(categoryName);
             batchState.VegetationGeneratedPlacementCount++;
@@ -2750,16 +4116,8 @@ public sealed class TileLoader : MonoBehaviour
 
             phaseStopwatch.Restart();
             ulong stableHash = ComputeStablePlacementHash(request, placement);
-            if (!ShouldKeepPlacementForTile(placement, isCenterTile, stableHash))
-            {
-                hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
-                tileStats.RecordSkipped(categoryName);
-                batchState.VegetationSkippedByPolicyCount++;
-                continue;
-            }
-            hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
-
             bool isTreePlacement = string.Equals(vegetationCategory, "tree", StringComparison.OrdinalIgnoreCase);
+            hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
             phaseStopwatch.Restart();
             if (!TryBuildPreparedPlacementGeometry(
                     batchState,
@@ -2768,6 +4126,7 @@ public sealed class TileLoader : MonoBehaviour
                     request,
                     placement,
                     isTreePlacement,
+                    enforceCurrentStreamingDistance: true,
                     out PreparedPlacementGeometry geometry))
             {
                 distanceAdmissionMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
@@ -2778,6 +4137,14 @@ public sealed class TileLoader : MonoBehaviour
             distanceAdmissionMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
 
             phaseStopwatch.Restart();
+            if (!ShouldKeepPlacementForTile(placement, geometry.DensityZone, stableHash))
+            {
+                hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
+                tileStats.RecordSkipped(categoryName);
+                batchState.VegetationSkippedByPolicyCount++;
+                continue;
+            }
+
             if (!ShouldKeepPlacementForDensityZone(placement, geometry.DensityZone, stableHash))
             {
                 hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
@@ -2787,13 +4154,13 @@ public sealed class TileLoader : MonoBehaviour
             }
             hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
 
-            TileObjectStreamingTier streamingTier = placement.Definition.StreamingTier;
+            bool nearPlayerPriority = geometry.DensityZone != VegetationDensityZone.Outer;
             var preparedPlacement = new PreparedVegetationPlacement(
                 placement,
                 stableHash,
                 isCenterTile,
-                DeterminePriorityBucket(isCenterTile, streamingTier),
-                ShouldForceInstancingOnlyForPreparedPlacement(isCenterTile, streamingTier),
+                DeterminePriorityBucket(isCenterTile, nearPlayerPriority, streamingTier),
+                ShouldForceInstancingOnlyForPreparedPlacement(isCenterTile, nearPlayerPriority, streamingTier),
                 geometry);
 
             int? maxPlacementsPerTile = placement.Definition.MaxPlacementsPerTile;
@@ -2983,7 +4350,7 @@ public sealed class TileLoader : MonoBehaviour
                 prototype,
                 out TileLoaderInstancedVegetationPlacement instancedPlacement))
         {
-            buildState.VegetationContainer ??= CreateVegetationContainer(buildState.Terrain.transform);
+            buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
             if (!buildState.PrototypeIndices.TryGetValue(prototype.Key, out int prototypeIndex))
             {
                 prototypeIndex = buildState.Prototypes.Count;
@@ -3020,7 +4387,7 @@ public sealed class TileLoader : MonoBehaviour
             return false;
         }
 
-        buildState.VegetationContainer ??= CreateVegetationContainer(buildState.Terrain.transform);
+        buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
         bool instantiated = InstantiatePreparedLegacyPlacement(
             buildState,
             tileStats,
@@ -3039,7 +4406,9 @@ public sealed class TileLoader : MonoBehaviour
             }
         }
 
-        return instantiated;
+        return instantiated &&
+               buildState.VegetationContainer != null &&
+               buildState.VegetationContainer.gameObject.activeInHierarchy;
     }
 
     private void FinalizeVegetationWorkItem(VegetationWorkItem workItem, Stopwatch totalStopwatch)
@@ -3060,13 +4429,27 @@ public sealed class TileLoader : MonoBehaviour
         double rendererFinalizeMilliseconds = shouldFinalizeRenderer
             ? FinalizeHybridVegetationBuild(workItem.BuildState)
             : 0d;
+        bool vegetationBecameVisible = false;
+        if (workItem.IsFinalChunkForTile)
+        {
+            vegetationBecameVisible = FinalizeVegetationBuildOutput(workItem.BuildState);
+        }
+
+        if (!vegetationBecameVisible &&
+            rendererFinalizeMilliseconds > 0d &&
+            workItem.BuildState.VegetationContainer != null &&
+            workItem.BuildState.VegetationContainer.gameObject.activeInHierarchy)
+        {
+            vegetationBecameVisible = true;
+        }
+
         RecordPlacementPhaseTiming(
             workItem.BuildState.BatchState,
             tileStats,
             rendererFinalizeMilliseconds,
             VegetationPlacementPhase.RendererFinalize,
             workItem);
-        if (rendererFinalizeMilliseconds > 0d)
+        if (vegetationBecameVisible)
         {
             tileStats?.RecordVisible(totalStopwatch.Elapsed.TotalMilliseconds);
         }
@@ -3096,7 +4479,7 @@ public sealed class TileLoader : MonoBehaviour
                 tileCoordinate,
                 workItem.IsCenterTile);
             int completedWorkItemCount = completedTileStats.RecordCompletedWorkItem(totalStopwatch.Elapsed.TotalMilliseconds);
-            int visibleInstancedPlacementCount = rendererFinalizeMilliseconds > 0d
+            int visibleInstancedPlacementCount = vegetationBecameVisible
                 ? Math.Max(0, workItem.BuildState.LastFinalizedPlacementCount - previousFinalizedPlacementCount)
                 : 0;
             TileLoaderInstancedVegetationRenderer? renderer = workItem.BuildState.VegetationContainer != null
@@ -3159,10 +4542,10 @@ public sealed class TileLoader : MonoBehaviour
 
     private static bool ShouldKeepPlacementForTile(
         TileObjectPlacement placement,
-        bool isCenterTile,
+        VegetationDensityZone densityZone,
         ulong stableHash)
     {
-        if (isCenterTile)
+        if (densityZone != VegetationDensityZone.Outer)
         {
             return true;
         }
@@ -3190,11 +4573,12 @@ public sealed class TileLoader : MonoBehaviour
 
     private bool TryBuildPreparedPlacementGeometry(
         GeneratedTerrainBatchState batchState,
-        VegetationTileStreamingStats tileStats,
+        VegetationTileStreamingStats? tileStats,
         GStylizedTerrain terrain,
         GeneratedTerrainRequest request,
         TileObjectPlacement placement,
         bool isTreePlacement,
+        bool enforceCurrentStreamingDistance,
         out PreparedPlacementGeometry geometry)
     {
         geometry = default;
@@ -3216,7 +4600,9 @@ public sealed class TileLoader : MonoBehaviour
         {
             distanceToTargetSq = (worldPosition - targetWorldPosition.Value).sqrMagnitude;
             float? loadDistanceMeters = placement.Definition.LoadDistanceMeters;
-            if (loadDistanceMeters.HasValue && loadDistanceMeters.Value > 0f)
+            if (enforceCurrentStreamingDistance &&
+                loadDistanceMeters.HasValue &&
+                loadDistanceMeters.Value > 0f)
             {
                 float maxDistanceSq = loadDistanceMeters.Value * loadDistanceMeters.Value;
                 if (distanceToTargetSq > maxDistanceSq)
@@ -3225,7 +4611,9 @@ public sealed class TileLoader : MonoBehaviour
                 }
             }
 
-            densityZone = ResolveVegetationDensityZone(distanceToTargetSq);
+            densityZone = enforceCurrentStreamingDistance
+                ? ResolveVegetationDensityZone(distanceToTargetSq, placement.Definition.StreamingTier)
+                : VegetationDensityZone.High;
         }
 
         bool useExactTerrainConformOnLoad =
@@ -3246,9 +4634,14 @@ public sealed class TileLoader : MonoBehaviour
         return true;
     }
 
+    private string ResolvePlayerCentricSurfaceCacheSignature(string batchCacheSignature)
+    {
+        return $"{batchCacheSignature}|surface-v{PlayerCentricSurfaceCacheVersion.ToString(CultureInfo.InvariantCulture)}";
+    }
+
     private void PopulatePreparedPlacementGeometryNormals(
         GeneratedTerrainBatchState batchState,
-        VegetationTileStreamingStats tileStats,
+        VegetationTileStreamingStats? tileStats,
         GeneratedTerrainRequest request,
         List<PreparedVegetationPlacement> preparedPlacements)
     {
@@ -3298,7 +4691,9 @@ public sealed class TileLoader : MonoBehaviour
         return distanceToTargetSq <= maxDistanceSq;
     }
 
-    private VegetationDensityZone ResolveVegetationDensityZone(float distanceToTargetSq)
+    private VegetationDensityZone ResolveVegetationDensityZone(
+        float distanceToTargetSq,
+        TileObjectStreamingTier streamingTier)
     {
         if (!Application.isPlaying)
         {
@@ -3311,6 +4706,12 @@ public sealed class TileLoader : MonoBehaviour
         if (distanceToTargetSq <= highDetailDistanceSq)
         {
             return VegetationDensityZone.High;
+        }
+
+        if (streamingTier == TileObjectStreamingTier.Clutter ||
+            streamingTier == TileObjectStreamingTier.Ground)
+        {
+            return VegetationDensityZone.Outer;
         }
 
         float midDetailDistanceSq = clampedMidDetailRadius * clampedMidDetailRadius;
@@ -3423,11 +4824,18 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
-    private VegetationPriorityBucket DeterminePriorityBucket(bool isCenterTile, TileObjectStreamingTier streamingTier)
+    private VegetationPriorityBucket DeterminePriorityBucket(
+        bool isCenterTile,
+        bool nearPlayerPriority,
+        TileObjectStreamingTier streamingTier)
     {
+        bool treatAsCenterPriority = streamingTier == TileObjectStreamingTier.Canopy ||
+                                     streamingTier == TileObjectStreamingTier.Large
+            ? isCenterTile || nearPlayerPriority
+            : nearPlayerPriority;
         if (streamingTier == TileObjectStreamingTier.Ground)
         {
-            return isCenterTile
+            return treatAsCenterPriority
                 ? VegetationPriorityBucket.CenterClutterAndGround
                 : VegetationPriorityBucket.OuterGroundAndDebris;
         }
@@ -3436,24 +4844,27 @@ public sealed class TileLoader : MonoBehaviour
         {
             if (!centerTileOnlyNonTreeBudgetFirst)
             {
-                return isCenterTile
+                return treatAsCenterPriority
                     ? VegetationPriorityBucket.CenterClutterAndGround
                     : VegetationPriorityBucket.OuterClutter;
             }
 
-            return isCenterTile
+            return treatAsCenterPriority
                 ? VegetationPriorityBucket.CenterClutterAndGround
                 : VegetationPriorityBucket.OuterClutter;
         }
 
-        return isCenterTile
+        return treatAsCenterPriority
             ? VegetationPriorityBucket.CenterCanopyAndLarge
             : VegetationPriorityBucket.OuterCanopyAndLarge;
     }
 
-    private static bool ShouldForceInstancingOnlyForPreparedPlacement(bool isCenterTile, TileObjectStreamingTier streamingTier)
+    private static bool ShouldForceInstancingOnlyForPreparedPlacement(
+        bool isCenterTile,
+        bool nearPlayerPriority,
+        TileObjectStreamingTier streamingTier)
     {
-        return !isCenterTile &&
+        return !nearPlayerPriority &&
                (streamingTier == TileObjectStreamingTier.Clutter || streamingTier == TileObjectStreamingTier.Ground);
     }
 
@@ -3523,6 +4934,12 @@ public sealed class TileLoader : MonoBehaviour
         Transform? vegetationContainer = null;
         foreach (TileObjectPlacement placement in request.Layers.PlacedObjects)
         {
+            if (ShouldUsePlayerCentricSurfaceVegetation() &&
+                IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier))
+            {
+                continue;
+            }
+
             GameObject? prefab = LoadPrefabForPlacement(placement);
             if (prefab == null)
             {
@@ -3575,6 +4992,7 @@ public sealed class TileLoader : MonoBehaviour
         }
 
         FinalizeHybridVegetationBuild(buildState);
+        FinalizeVegetationBuildOutput(buildState);
     }
 
     private HybridVegetationBuildState? BeginHybridVegetationBuild(
@@ -3593,6 +5011,7 @@ public sealed class TileLoader : MonoBehaviour
             batchState,
             terrain,
             request,
+            FindVegetationContainer(terrain.transform),
             normalizationMinHeight,
             normalizationMaxHeight);
     }
@@ -3621,6 +5040,12 @@ public sealed class TileLoader : MonoBehaviour
 
         TileObjectPlacement placement = placedObjects[buildState.NextPlacementIndex];
         buildState.NextPlacementIndex++;
+        if (ShouldUsePlayerCentricSurfaceVegetation() &&
+            IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier))
+        {
+            return buildState.NextPlacementIndex < placedObjects.Count;
+        }
+
         GameObject? prefab = LoadPrefabForPlacement(placement);
         if (prefab == null)
         {
@@ -3650,7 +5075,7 @@ public sealed class TileLoader : MonoBehaviour
                 buildState.NormalizationMaxHeight,
                 out TileLoaderInstancedVegetationPlacement instancedPlacement))
         {
-            buildState.VegetationContainer ??= CreateVegetationContainer(buildState.Terrain.transform);
+            buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
             if (!buildState.PrototypeIndices.TryGetValue(prototype.Key, out int prototypeIndex))
             {
                 prototypeIndex = buildState.Prototypes.Count;
@@ -3676,7 +5101,7 @@ public sealed class TileLoader : MonoBehaviour
             return buildState.NextPlacementIndex < placedObjects.Count;
         }
 
-        buildState.VegetationContainer ??= CreateVegetationContainer(buildState.Terrain.transform);
+        buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
         InstantiateLegacyPlacement(
             buildState.Terrain,
             buildState.Request,
@@ -3931,9 +5356,7 @@ public sealed class TileLoader : MonoBehaviour
 
     private Transform CreateVegetationContainer(Transform terrainTransform)
     {
-        string containerName = string.IsNullOrWhiteSpace(generatedVegetationContainerName)
-            ? "Vegetation"
-            : generatedVegetationContainerName.Trim();
+        string containerName = GetVegetationContainerName();
         Transform existing = terrainTransform.Find(containerName);
         if (existing != null)
         {
@@ -3946,6 +5369,128 @@ public sealed class TileLoader : MonoBehaviour
         container.transform.localRotation = Quaternion.identity;
         container.transform.localScale = Vector3.one;
         return container.transform;
+    }
+
+    private string GetVegetationContainerName()
+    {
+        return string.IsNullOrWhiteSpace(generatedVegetationContainerName)
+            ? "Vegetation"
+            : generatedVegetationContainerName.Trim();
+    }
+
+    private string GetVegetationBuildContainerName(int pipelineId)
+    {
+        return GetVegetationContainerName() + "_Build_" + pipelineId.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private Transform? FindVegetationContainer(Transform terrainTransform)
+    {
+        if (terrainTransform == null)
+        {
+            return null;
+        }
+
+        return terrainTransform.Find(GetVegetationContainerName());
+    }
+
+    private Transform GetOrCreateVegetationBuildContainer(HybridVegetationBuildState buildState)
+    {
+        if (buildState.VegetationContainer != null)
+        {
+            return buildState.VegetationContainer;
+        }
+
+        int pipelineId = buildState.BatchState?.PipelineId ?? activeGenerationPipelineId;
+        string buildContainerName = GetVegetationBuildContainerName(pipelineId);
+        Transform? existing = buildState.Terrain.transform.Find(buildContainerName);
+        if (existing != null)
+        {
+            buildState.VegetationContainer = existing;
+            return existing;
+        }
+
+        var container = new GameObject(buildContainerName);
+        container.transform.SetParent(buildState.Terrain.transform, false);
+        container.transform.localPosition = Vector3.zero;
+        container.transform.localRotation = Quaternion.identity;
+        container.transform.localScale = Vector3.one;
+        container.SetActive(buildState.ExistingVegetationContainer == null);
+        buildState.VegetationContainer = container.transform;
+        return buildState.VegetationContainer;
+    }
+
+    private bool FinalizeVegetationBuildOutput(HybridVegetationBuildState buildState)
+    {
+        if (buildState.HasSwappedVegetationContainer || buildState.VegetationContainer == null)
+        {
+            return false;
+        }
+
+        string canonicalContainerName = GetVegetationContainerName();
+        Transform outputContainer = buildState.VegetationContainer;
+        bool activatedContainer = !outputContainer.gameObject.activeSelf;
+        if (buildState.ExistingVegetationContainer != null &&
+            buildState.ExistingVegetationContainer != outputContainer)
+        {
+            RetireGeneratedContainer(buildState.ExistingVegetationContainer);
+        }
+
+        for (int childIndex = buildState.Terrain.transform.childCount - 1; childIndex >= 0; childIndex--)
+        {
+            Transform child = buildState.Terrain.transform.GetChild(childIndex);
+            if (child == null || child == outputContainer)
+            {
+                continue;
+            }
+
+            if (child.name == canonicalContainerName ||
+                child.name.StartsWith(canonicalContainerName + "_Build_", StringComparison.Ordinal))
+            {
+                RetireGeneratedContainer(child);
+            }
+        }
+
+        outputContainer.name = canonicalContainerName;
+        outputContainer.gameObject.SetActive(true);
+        buildState.HasSwappedVegetationContainer = true;
+        return activatedContainer;
+    }
+
+    private void FinalizeVegetationClearOnlyTerrains(GeneratedTerrainBatchState batchState)
+    {
+        for (int i = 0; i < batchState.VegetationClearOnlyTerrains.Count; i++)
+        {
+            GStylizedTerrain terrain = batchState.VegetationClearOnlyTerrains[i];
+            if (terrain == null)
+            {
+                continue;
+            }
+
+            Transform? vegetationContainer = FindVegetationContainer(terrain.transform);
+            if (vegetationContainer != null)
+            {
+                RetireGeneratedContainer(vegetationContainer);
+            }
+        }
+    }
+
+    private void DiscardPendingVegetationBuildOutputs(GeneratedTerrainBatchState batchState)
+    {
+        string buildContainerName = GetVegetationBuildContainerName(batchState.PipelineId);
+        for (int i = 0; i < batchState.VegetationRefreshTerrains.Count; i++)
+        {
+            GStylizedTerrain terrain = batchState.VegetationRefreshTerrains[i];
+            if (terrain == null)
+            {
+                continue;
+            }
+
+            Transform? buildContainer = terrain.transform.Find(buildContainerName);
+            if (buildContainer != null)
+            {
+                RetireGeneratedContainer(buildContainer);
+            }
+        }
     }
 
     private TileLoaderInstancedVegetationPrototype? GetOrCreateVegetationPrototype(

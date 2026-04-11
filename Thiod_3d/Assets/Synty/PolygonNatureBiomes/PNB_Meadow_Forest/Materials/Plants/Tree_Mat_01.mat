@@ -166,7 +166,7 @@ Material:
     - _LeafNormalAmount: 0.5
     - _LeafSmoothness: 0.2
     - _Leaf_Ambient_Occlusion_Intensity: 0.5
-    - _Leaf_Flat_Color: 1
+    - _Leaf_Flat_Color: 0
     - _Leaf_Metallic: 0
     - _Leaf_Normal_Strength: 0.5
     - _Leaf_Smoothness: 0.2

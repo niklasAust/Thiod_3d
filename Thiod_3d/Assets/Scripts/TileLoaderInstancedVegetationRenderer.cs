@@ -175,7 +175,10 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         IsPrototypeRuntimeReady = false;
         var initializeStopwatch = Stopwatch.StartNew();
 
-        if (Application.isPlaying && _placements.Length > 512 && _prototypeInitBudgetMsPerFrame > 0f)
+        if (Application.isPlaying &&
+            gameObject.activeInHierarchy &&
+            _placements.Length > 512 &&
+            _prototypeInitBudgetMsPerFrame > 0f)
         {
             _prototypeRuntimes = new PrototypeRuntime[_prototypes.Length];
             _runtimeBuildCoroutine = StartCoroutine(BuildPrototypeRuntimesOverMultipleFrames());
