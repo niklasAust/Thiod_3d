@@ -9,6 +9,18 @@ using WorldGen;
 
 internal sealed class TileLoaderBatchPlanner
 {
+    internal readonly struct BatchBuildResult
+    {
+        public BatchBuildResult(GeneratedTerrainBatchState batchState, GeneratedTerrainBatchCacheEntry? cachedTerrainBatch)
+        {
+            BatchState = batchState;
+            CachedTerrainBatch = cachedTerrainBatch;
+        }
+
+        public GeneratedTerrainBatchState BatchState { get; }
+        public GeneratedTerrainBatchCacheEntry? CachedTerrainBatch { get; }
+    }
+
     private readonly TerrainBuildContext context;
     private readonly double metersPerTileHeightUnit;
 
@@ -24,33 +36,61 @@ internal sealed class TileLoaderBatchPlanner
         GenerationSettings settings,
         int pipelineId,
         ref GeneratedTerrainBatchCacheEntry? cachedTerrainBatch,
-        Transform? activeGeneratedTerrainRoot,
+        bool hasActiveGeneratedTerrainRoot,
         Vector3Int? activeLoadedUnityTileCoordinate,
         IReadOnlyDictionary<Vector2Int, GeneratedTerrainTileData> activeTerrainTileCache,
         string? activeTerrainTileCacheSignature)
     {
-        string cacheSignature = BuildGeneratedTerrainCacheSignature(loadedWorldData, settings);
-        if (ShouldUseIncrementalNeighborhoodRequestReuse(
+        BatchBuildResult result = BuildBatchStateResult(
+            tileGenerator,
+            loadedWorldData,
+            settings,
+            pipelineId,
+            cachedTerrainBatch,
+            hasActiveGeneratedTerrainRoot,
+            activeLoadedUnityTileCoordinate,
+            activeTerrainTileCache,
+            activeTerrainTileCacheSignature,
+            BuildGeneratedTerrainCacheSignature(loadedWorldData, settings));
+        cachedTerrainBatch = result.CachedTerrainBatch;
+        return result.BatchState;
+    }
+
+    public BatchBuildResult BuildBatchStateResult(
+        TileGenerator tileGenerator,
+        LoadedWorldData loadedWorldData,
+        GenerationSettings settings,
+        int pipelineId,
+        GeneratedTerrainBatchCacheEntry? cachedTerrainBatch,
+        bool hasActiveGeneratedTerrainRoot,
+        Vector3Int? activeLoadedUnityTileCoordinate,
+        IReadOnlyDictionary<Vector2Int, GeneratedTerrainTileData> activeTerrainTileCache,
+        string? activeTerrainTileCacheSignature,
+        string cacheSignature)
+    {
+        GeneratedTerrainBatchCacheEntry? updatedCachedTerrainBatch = cachedTerrainBatch;
+            if (ShouldUseIncrementalNeighborhoodRequestReuse(
                 cacheSignature,
-                activeGeneratedTerrainRoot,
+                hasActiveGeneratedTerrainRoot,
                 activeLoadedUnityTileCoordinate,
                 activeTerrainTileCache,
                 activeTerrainTileCacheSignature))
         {
-            return BuildIncrementalGeneratedTerrainBatchState(
+            GeneratedTerrainBatchState batchState = BuildIncrementalGeneratedTerrainBatchState(
                 tileGenerator,
                 loadedWorldData,
                 settings,
                 pipelineId,
                 cacheSignature,
-                ref cachedTerrainBatch,
+                ref updatedCachedTerrainBatch,
                 activeTerrainTileCache);
+            return new BatchBuildResult(batchState, updatedCachedTerrainBatch);
         }
 
         string cacheKey = BuildGeneratedTerrainBatchCacheKey(cacheSignature);
-        if (cachedTerrainBatch != null && cachedTerrainBatch.CacheKey == cacheKey)
+        if (updatedCachedTerrainBatch != null && updatedCachedTerrainBatch.CacheKey == cacheKey)
         {
-            return cachedTerrainBatch.CreateState(pipelineId);
+            return new BatchBuildResult(updatedCachedTerrainBatch.CreateState(pipelineId), updatedCachedTerrainBatch);
         }
 
         var requests = new List<GeneratedTerrainRequest>();
@@ -121,21 +161,23 @@ internal sealed class TileLoaderBatchPlanner
         Vector2Int[] orderedTileCoordinates = BuildOrderedTileCoordinates(requests);
         if (requests.Count == 0)
         {
-            return new GeneratedTerrainBatchState(
-                populatedCacheKey,
-                cacheSignature,
-                pipelineId,
-                context.UnityTileCoordinate,
-                batchRootLocalPosition,
-                Array.Empty<GeneratedTerrainRequest>(),
-                Array.Empty<Vector2Int>(),
-                loadedWorldData.GlobalMinHeight,
-                loadedWorldData.GlobalMaxHeight);
+            return new BatchBuildResult(
+                new GeneratedTerrainBatchState(
+                    populatedCacheKey,
+                    cacheSignature,
+                    pipelineId,
+                    context.UnityTileCoordinate,
+                    batchRootLocalPosition,
+                    Array.Empty<GeneratedTerrainRequest>(),
+                    Array.Empty<Vector2Int>(),
+                    loadedWorldData.GlobalMinHeight,
+                    loadedWorldData.GlobalMaxHeight),
+                updatedCachedTerrainBatch);
         }
 
         double normalizationMinHeight = Math.Min(loadedWorldData.GlobalMinHeight, batchMinHeight);
         double normalizationMaxHeight = Math.Max(loadedWorldData.GlobalMaxHeight, batchMaxHeight);
-        cachedTerrainBatch = new GeneratedTerrainBatchCacheEntry(
+        updatedCachedTerrainBatch = new GeneratedTerrainBatchCacheEntry(
             populatedCacheKey,
             cacheSignature,
             context.UnityTileCoordinate,
@@ -145,8 +187,11 @@ internal sealed class TileLoaderBatchPlanner
             requests,
             orderedTileCoordinates);
 
-        return cachedTerrainBatch.CreateState(pipelineId);
+        return new BatchBuildResult(updatedCachedTerrainBatch.CreateState(pipelineId), updatedCachedTerrainBatch);
     }
+
+    public string BuildCacheSignature(LoadedWorldData loadedWorldData, GenerationSettings settings)
+        => BuildGeneratedTerrainCacheSignature(loadedWorldData, settings);
 
     private string BuildGeneratedTerrainCacheSignature(LoadedWorldData loadedWorldData, GenerationSettings settings)
     {
@@ -211,16 +256,15 @@ internal sealed class TileLoaderBatchPlanner
 
     private bool ShouldUseIncrementalNeighborhoodRequestReuse(
         string cacheSignature,
-        Transform? activeGeneratedTerrainRoot,
+        bool hasActiveGeneratedTerrainRoot,
         Vector3Int? activeLoadedUnityTileCoordinate,
         IReadOnlyDictionary<Vector2Int, GeneratedTerrainTileData> activeTerrainTileCache,
         string? activeTerrainTileCacheSignature)
     {
-        if (!Application.isPlaying ||
-            !context.DynamicTileLoadingEnabled ||
+        if (!context.DynamicTileLoadingEnabled ||
             !context.ReuseOverlappingDynamicNeighborhoodTiles ||
             !context.UseBatchNeighborhoodLoading ||
-            activeGeneratedTerrainRoot == null ||
+            !hasActiveGeneratedTerrainRoot ||
             !activeLoadedUnityTileCoordinate.HasValue ||
             activeTerrainTileCache.Count == 0)
         {
@@ -349,7 +393,7 @@ internal sealed class TileLoaderBatchPlanner
 
     private Vector3 GetBatchRootLocalPosition(Vector3Int centerTileCoordinate)
     {
-        if (!Application.isPlaying || !context.DynamicTileLoadingEnabled)
+        if (!context.DynamicTileLoadingEnabled)
         {
             return Vector3.zero;
         }

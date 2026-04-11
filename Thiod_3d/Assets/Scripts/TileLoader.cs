@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Stopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
 using Unity.Mathematics;
@@ -178,6 +179,7 @@ public sealed class TileLoader : MonoBehaviour
     [SerializeField] private bool spreadVegetationPlacementAcrossFrames = true;
     [FormerlySerializedAs("vegetationInstancingFrameBudgetMilliseconds")]
     [SerializeField, Min(0.25f)] private float vegetationPlacementBudgetMsPerFrame = 12f;
+    [SerializeField, Min(0.25f)] private float playerCentricSurfaceBuildBudgetMsPerFrame = 4f;
     [SerializeField, Min(0.1f)] private float prototypeInitBudgetMsPerFrame = 4f;
     [SerializeField] private bool centerTileOnlyNonTreeBudgetFirst = true;
     [SerializeField, Min(0f)] private float highDetailPlacementRadiusMeters = 45f;
@@ -264,6 +266,7 @@ public sealed class TileLoader : MonoBehaviour
     private TileLoaderTerrainSampler? cachedTerrainSampler;
     private Vector3Int? queuedDynamicUnityTileCoordinate;
     private Vector3Int? activeLoadedUnityTileCoordinate;
+    private Vector3Int? activeRuntimeRequestedTileCoordinate;
     private readonly HashSet<Vector3Int> queuedDynamicUnityTileCoordinates = new();
     private Vector3 lastDynamicLoadTargetLocalPosition;
     private bool hasDynamicLoadTargetLocalPosition;
@@ -352,6 +355,7 @@ public sealed class TileLoader : MonoBehaviour
         hasDynamicLoadTargetLocalPosition = false;
         queuedDynamicUnityTileCoordinates.Clear();
         queuedDynamicUnityTileCoordinate = null;
+        activeRuntimeRequestedTileCoordinate = null;
         nextPlayerCentricSurfaceUpdateTime = 0f;
     }
 
@@ -946,6 +950,7 @@ public sealed class TileLoader : MonoBehaviour
         if (terrainPhaseLoadInProgress)
         {
             EnqueueDynamicTileLoadRequest(runtimeTileCoordinate);
+            InvalidateActiveRuntimeTerrainLoadIfStale(runtimeTileCoordinate);
             return false;
         }
 
@@ -980,6 +985,7 @@ public sealed class TileLoader : MonoBehaviour
 
         if (terrainPhaseLoadInProgress)
         {
+            InvalidateActiveRuntimeTerrainLoadIfStale(tileCoordinate);
             return;
         }
 
@@ -1250,33 +1256,47 @@ public sealed class TileLoader : MonoBehaviour
 
     private void PruneQueuedDynamicLoadRequests(Vector3Int preferredTileCoordinate)
     {
-        if (queuedDynamicUnityTileCoordinates.Count <= 6)
+        Vector3Int desiredCenterTileCoordinate = ResolveCurrentDesiredDynamicNeighborhoodCenter(preferredTileCoordinate);
+        int discardedRequestCount = 0;
+        foreach (Vector3Int candidate in new List<Vector3Int>(queuedDynamicUnityTileCoordinates))
         {
-            return;
+            if (IsTileCoordinateWithinDynamicNeighborhood(candidate, desiredCenterTileCoordinate))
+            {
+                continue;
+            }
+
+            queuedDynamicUnityTileCoordinates.Remove(candidate);
+            discardedRequestCount++;
         }
 
-        TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int playerTileCoordinate);
-        var candidates = new List<Vector3Int>(queuedDynamicUnityTileCoordinates);
-        candidates.Sort((left, right) =>
-            CompareQueuedDynamicTilePriority(left, right, playerTileCoordinate, preferredTileCoordinate));
-        for (int i = 6; i < candidates.Count; i++)
+        if (queuedDynamicUnityTileCoordinate.HasValue &&
+            !IsTileCoordinateWithinDynamicNeighborhood(queuedDynamicUnityTileCoordinate.Value, desiredCenterTileCoordinate))
         {
-            queuedDynamicUnityTileCoordinates.Remove(candidates[i]);
+            queuedDynamicUnityTileCoordinate = null;
+        }
+
+        if (discardedRequestCount > 0)
+        {
+            Debug.Log(
+                $"TileLoader discarded {discardedRequestCount} stale queued dynamic tile request(s) outside the current neighborhood around {desiredCenterTileCoordinate}.",
+                this);
         }
     }
 
     private bool TryResolveBestQueuedDynamicTileCoordinate(out Vector3Int tileCoordinate)
     {
+        Vector3Int preferredTileCoordinate = queuedDynamicUnityTileCoordinate ?? unityTileCoordinate;
+        Vector3Int desiredCenterTileCoordinate = ResolveCurrentDesiredDynamicNeighborhoodCenter(preferredTileCoordinate);
+        PruneQueuedDynamicLoadRequests(desiredCenterTileCoordinate);
         if (queuedDynamicUnityTileCoordinates.Count == 0)
         {
-            tileCoordinate = queuedDynamicUnityTileCoordinate ?? unityTileCoordinate;
-            return queuedDynamicUnityTileCoordinate.HasValue;
+            tileCoordinate = desiredCenterTileCoordinate;
+            return false;
         }
 
-        Vector3Int preferredTileCoordinate = queuedDynamicUnityTileCoordinate ?? unityTileCoordinate;
         TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int playerTileCoordinate);
         bool found = false;
-        Vector3Int bestCoordinate = preferredTileCoordinate;
+        Vector3Int bestCoordinate = desiredCenterTileCoordinate;
         foreach (Vector3Int candidate in queuedDynamicUnityTileCoordinates)
         {
             if (!found ||
@@ -1362,6 +1382,89 @@ public sealed class TileLoader : MonoBehaviour
         return Math.Abs(left.x - right.x) + Math.Abs(left.y - right.y);
     }
 
+    private Vector3Int ResolveCurrentDesiredDynamicNeighborhoodCenter(Vector3Int fallbackTileCoordinate)
+    {
+        if (queuedDynamicUnityTileCoordinate.HasValue)
+        {
+            return queuedDynamicUnityTileCoordinate.Value;
+        }
+
+        if (dynamicTileLoadingEnabled)
+        {
+            return unityTileCoordinate;
+        }
+
+        return activeRuntimeRequestedTileCoordinate ??
+               activeLoadedUnityTileCoordinate ??
+               fallbackTileCoordinate;
+    }
+
+    private int GetDynamicLoadNeighborhoodRadiusInTiles()
+    {
+        return UsesBatchNeighborhoodLoading() ? 1 : 0;
+    }
+
+    private bool IsTileCoordinateWithinDynamicNeighborhood(Vector3Int tileCoordinate, Vector3Int centerTileCoordinate)
+    {
+        int radius = GetDynamicLoadNeighborhoodRadiusInTiles();
+        return Math.Abs(tileCoordinate.x - centerTileCoordinate.x) <= radius &&
+               Math.Abs(tileCoordinate.y - centerTileCoordinate.y) <= radius;
+    }
+
+    private bool IsRuntimeBatchStillRelevant(GeneratedTerrainBatchState batchState)
+    {
+        Vector3Int desiredCenterTileCoordinate = ResolveCurrentDesiredDynamicNeighborhoodCenter(batchState.CenterTileCoordinate);
+        return IsTileCoordinateWithinDynamicNeighborhood(batchState.CenterTileCoordinate, desiredCenterTileCoordinate);
+    }
+
+    private void InvalidateActiveRuntimeTerrainLoadIfStale(Vector3Int desiredCenterTileCoordinate)
+    {
+        if (!terrainPhaseLoadInProgress ||
+            activeTerrainLoadCoroutine == null ||
+            !activeRuntimeRequestedTileCoordinate.HasValue)
+        {
+            return;
+        }
+
+        Vector3Int activeRequestedCenter = activeRuntimeRequestedTileCoordinate.Value;
+        if (IsTileCoordinateWithinDynamicNeighborhood(activeRequestedCenter, desiredCenterTileCoordinate))
+        {
+            return;
+        }
+
+        int stalePipelineId = activeGenerationPipelineId;
+        activeGenerationPipelineId++;
+        activeRuntimeRequestedTileCoordinate = desiredCenterTileCoordinate;
+        Debug.Log(
+            $"TileLoader aborted stale runtime batch pipeline {stalePipelineId} for center {activeRequestedCenter}; current desired center is {desiredCenterTileCoordinate}.",
+            this);
+    }
+
+    private void CleanupAbortedRuntimeBatch(GeneratedTerrainBatchState batchState)
+    {
+        if (batchState.BatchRoot != null && batchState.BatchRoot != activeGeneratedTerrainRoot)
+        {
+            DestroyGeneratedTerrainContainer(batchState.BatchRoot);
+            batchState.BatchRoot = null;
+        }
+
+        if (activeRuntimeRequestedTileCoordinate.HasValue &&
+            activeRuntimeRequestedTileCoordinate.Value == batchState.CenterTileCoordinate)
+        {
+            activeRuntimeRequestedTileCoordinate = null;
+        }
+    }
+
+    private void ReleaseTerrainPhaseAfterAbortedBatch(GeneratedTerrainBatchState batchState)
+    {
+        CleanupAbortedRuntimeBatch(batchState);
+        if (activeTerrainLoadCoroutine == null && activeVegetationPopulationCoroutine == null)
+        {
+            terrainPhaseLoadInProgress = false;
+            TryDispatchQueuedDynamicLoad();
+        }
+    }
+
     private bool TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int tileCoordinate)
     {
         Transform? target = ResolveDynamicLoadTarget();
@@ -1434,6 +1537,14 @@ public sealed class TileLoader : MonoBehaviour
                 ClearGeneratedTerrains();
             }
 
+            if (doubleBufferedRuntimeSwap)
+            {
+                awaitingDeferredPhaseCompletion = true;
+                activeTerrainLoadCoroutine = StartCoroutine(
+                    BuildAndStreamRuntimeTerrainBatch(tileGenerator, loadedWorldData, settings, pipelineId, unityTileCoordinate));
+                return;
+            }
+
             GeneratedTerrainBatchState batchState = MeasureGenerationPhase(
                 BatchWorldgenMarker,
                 UsesBatchNeighborhoodLoading() ? "3x3 batch worldgen" : "tile worldgen",
@@ -1448,14 +1559,6 @@ public sealed class TileLoader : MonoBehaviour
             {
                 pendingBatchRoot = CreateGeneratedTerrainBatchRoot(pipelineId, batchState.CenterTileCoordinate);
                 batchState.BatchRoot = pendingBatchRoot;
-            }
-
-            if (doubleBufferedRuntimeSwap)
-            {
-                awaitingDeferredPhaseCompletion = true;
-                activeTerrainLoadCoroutine = StartCoroutine(StreamRuntimeTerrainBatch(batchState));
-                pendingBatchRoot = null;
-                return;
             }
 
             MeasureGenerationPhase(
@@ -1590,19 +1693,107 @@ public sealed class TileLoader : MonoBehaviour
                 activeTerrainLoadCoroutine = null;
             }
 
-            if (!completed &&
-                batchState.PipelineId == activeGenerationPipelineId &&
-                activeVegetationPopulationCoroutine == null)
+            if (!completed)
             {
-                terrainPhaseLoadInProgress = false;
-                TryDispatchQueuedDynamicLoad();
+                ReleaseTerrainPhaseAfterAbortedBatch(batchState);
+            }
+        }
+    }
+
+    private IEnumerator BuildAndStreamRuntimeTerrainBatch(
+        TileGenerator tileGenerator,
+        LoadedWorldData loadedWorldData,
+        GenerationSettings settings,
+        int pipelineId,
+        Vector3Int requestedCenterTileCoordinate)
+    {
+        bool handedOffToStreamCoroutine = false;
+        try
+        {
+            activeRuntimeRequestedTileCoordinate = requestedCenterTileCoordinate;
+            TileLoaderBatchPlanner planner = CreateBatchPlanner();
+            string phaseName = UsesBatchNeighborhoodLoading() ? "3x3 batch worldgen" : "tile worldgen";
+            string cacheSignature = planner.BuildCacheSignature(loadedWorldData, settings);
+            var stopwatch = Stopwatch.StartNew();
+            Task<TileLoaderBatchPlanner.BatchBuildResult> buildTask = Task.Run(() =>
+                planner.BuildBatchStateResult(
+                    tileGenerator,
+                    loadedWorldData,
+                    settings,
+                    pipelineId,
+                    cachedTerrainBatch,
+                    activeGeneratedTerrainRoot != null,
+                    activeLoadedUnityTileCoordinate,
+                    activeTerrainTileCache,
+                    activeTerrainTileCacheSignature,
+                    cacheSignature));
+
+            while (!buildTask.IsCompleted)
+            {
+                if (this == null || pipelineId != activeGenerationPipelineId)
+                {
+                    yield break;
+                }
+
+                yield return null;
+            }
+
+            if (buildTask.IsFaulted)
+            {
+                Exception? exception = buildTask.Exception?.GetBaseException() ?? buildTask.Exception;
+                if (exception != null)
+                {
+                    Debug.LogException(exception, this);
+                }
+
+                yield break;
+            }
+
+            TileLoaderBatchPlanner.BatchBuildResult buildResult = buildTask.Result;
+            cachedTerrainBatch = buildResult.CachedTerrainBatch;
+            GeneratedTerrainBatchState batchState = buildResult.BatchState;
+            stopwatch.Stop();
+            RecordGenerationPhaseTiming(batchState, phaseName, stopwatch.Elapsed);
+            LogGenerationPhaseTiming(phaseName, stopwatch.Elapsed);
+
+            if (batchState.Requests.Count == 0)
+            {
+                yield break;
+            }
+
+            if (!TryReuseActiveTerrainBatchRoot(batchState))
+            {
+                batchState.BatchRoot = CreateGeneratedTerrainBatchRoot(pipelineId, batchState.CenterTileCoordinate);
+            }
+
+            handedOffToStreamCoroutine = true;
+            yield return StreamRuntimeTerrainBatch(batchState);
+        }
+        finally
+        {
+            if (!handedOffToStreamCoroutine)
+            {
+                activeTerrainLoadCoroutine = null;
+                if (activeRuntimeRequestedTileCoordinate.HasValue &&
+                    activeRuntimeRequestedTileCoordinate.Value == requestedCenterTileCoordinate)
+                {
+                    activeRuntimeRequestedTileCoordinate = null;
+                }
+
+                if (activeVegetationPopulationCoroutine == null)
+                {
+                    terrainPhaseLoadInProgress = false;
+                    TryDispatchQueuedDynamicLoad();
+                }
             }
         }
     }
 
     private bool ShouldAbortRuntimeTerrainStreaming(GeneratedTerrainBatchState batchState)
     {
-        return this == null || batchState.PipelineId != activeGenerationPipelineId;
+        return this == null ||
+               batchState.PipelineId != activeGenerationPipelineId ||
+               !IsRuntimeBatchStillRelevant(batchState);
     }
 
     private IEnumerator CreateTerrainsOverMultipleFrames(GeneratedTerrainBatchState batchState)
@@ -2135,7 +2326,7 @@ public sealed class TileLoader : MonoBehaviour
             settings,
             pipelineId,
             ref cachedTerrainBatch,
-            activeGeneratedTerrainRoot,
+            activeGeneratedTerrainRoot != null,
             activeLoadedUnityTileCoordinate,
             activeTerrainTileCache,
             activeTerrainTileCacheSignature);
@@ -2167,8 +2358,9 @@ public sealed class TileLoader : MonoBehaviour
 
     private void ContinueDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
     {
-        if (batchState.PipelineId != activeGenerationPipelineId || this == null)
+        if (this == null || ShouldAbortRuntimeTerrainStreaming(batchState))
         {
+            ReleaseTerrainPhaseAfterAbortedBatch(batchState);
             return;
         }
 
@@ -2312,8 +2504,9 @@ public sealed class TileLoader : MonoBehaviour
 
     private void FinishDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
     {
-        if (batchState.PipelineId != activeGenerationPipelineId || this == null)
+        if (this == null || ShouldAbortRuntimeTerrainStreaming(batchState))
         {
+            ReleaseTerrainPhaseAfterAbortedBatch(batchState);
             return;
         }
 
@@ -2326,6 +2519,11 @@ public sealed class TileLoader : MonoBehaviour
             batchState.VegetationStreamingTargetWorldPosition ??
             ResolveVegetationStreamingTargetWorldPosition();
         lastCompletedGenerationPipelineId = batchState.PipelineId;
+        if (activeRuntimeRequestedTileCoordinate.HasValue &&
+            activeRuntimeRequestedTileCoordinate.Value == batchState.CenterTileCoordinate)
+        {
+            activeRuntimeRequestedTileCoordinate = null;
+        }
         LogGenerationBatchSummary(batchState, "complete");
         terrainPhaseLoadInProgress = false;
         TryDispatchQueuedDynamicLoad();
@@ -3821,6 +4019,148 @@ public sealed class TileLoader : MonoBehaviour
         UpdatePlayerCentricSurfaceVegetation(forceImmediate: true, batchState, totalStopwatch);
     }
 
+    private IEnumerator EnsurePlayerCentricSurfaceCachesOverMultipleFrames(
+        GeneratedTerrainBatchState batchState,
+        Stopwatch totalStopwatch)
+    {
+        if (!ShouldUsePlayerCentricSurfaceVegetation())
+        {
+            yield break;
+        }
+
+        var sourceBuildStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        float frameBudgetMilliseconds = Math.Max(0.25f, playerCentricSurfaceBuildBudgetMsPerFrame);
+        int builtTileCacheCount = 0;
+        int builtCellCount = 0;
+        int builtPlacementCount = 0;
+
+        for (int i = 0; i < batchState.Requests.Count; i++)
+        {
+            if (batchState.PipelineId != activeGenerationPipelineId || this == null)
+            {
+                yield break;
+            }
+
+            GeneratedTerrainRequest request = batchState.Requests[i];
+            Vector2Int tileCoordinate = GetTileCoordinate(request);
+            if (!batchState.TerrainByCoordinate.TryGetValue(tileCoordinate, out GStylizedTerrain terrain) || terrain == null)
+            {
+                continue;
+            }
+
+            IReadOnlyList<TileObjectPlacement> placedObjects = request.Layers.PlacedObjects ?? Array.Empty<TileObjectPlacement>();
+            bool hasSurfacePlacements = false;
+            for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
+            {
+                if (IsPlayerCentricSurfaceTier(placedObjects[placementIndex].Definition.StreamingTier))
+                {
+                    hasSurfacePlacements = true;
+                    break;
+                }
+            }
+
+            if (!hasSurfacePlacements)
+            {
+                RemovePlayerCentricSurfaceTileCache(tileCoordinate);
+                continue;
+            }
+
+            int terrainInstanceId = terrain.GetInstanceID();
+            if (playerCentricSurfaceTileCaches.TryGetValue(tileCoordinate, out PlayerCentricSurfaceTileCache? existingCache) &&
+                existingCache.CacheSignature == ResolvePlayerCentricSurfaceCacheSignature(batchState.CacheSignature) &&
+                existingCache.TerrainInstanceId == terrainInstanceId &&
+                existingCache.Terrain == terrain)
+            {
+                playerCentricSurfaceTileByTerrainInstanceId[terrainInstanceId] = tileCoordinate;
+                continue;
+            }
+
+            RemovePlayerCentricSurfaceTileCache(tileCoordinate);
+            PlayerCentricSurfaceTileCache? rebuiltCache = null;
+            int rebuiltCellCount = 0;
+            int rebuiltPlacementCount = 0;
+            yield return BuildPlayerCentricSurfaceTileCacheOverMultipleFrames(
+                batchState,
+                terrain,
+                request,
+                frameStopwatch,
+                frameBudgetMilliseconds,
+                cache =>
+                {
+                    rebuiltCache = cache;
+                },
+                (cellCount, placementCount) =>
+                {
+                    rebuiltCellCount = cellCount;
+                    rebuiltPlacementCount = placementCount;
+                });
+
+            if (rebuiltCache == null)
+            {
+                continue;
+            }
+
+            playerCentricSurfaceTileCaches[tileCoordinate] = rebuiltCache;
+            playerCentricSurfaceTileByTerrainInstanceId[rebuiltCache.TerrainInstanceId] = tileCoordinate;
+            builtTileCacheCount++;
+            builtCellCount += rebuiltCellCount;
+            builtPlacementCount += rebuiltPlacementCount;
+
+            if (frameStopwatch.Elapsed.TotalMilliseconds >= frameBudgetMilliseconds)
+            {
+                frameStopwatch.Restart();
+                yield return null;
+            }
+        }
+
+        sourceBuildStopwatch.Stop();
+        batchState.PlayerCentricSurfaceTileCacheBuildCount += builtTileCacheCount;
+        batchState.PlayerCentricSurfaceCellBuildCount += builtCellCount;
+        batchState.PlayerCentricSurfacePlacementCount += builtPlacementCount;
+        batchState.PlayerCentricSurfaceSourceBuildCpuMilliseconds += sourceBuildStopwatch.Elapsed.TotalMilliseconds;
+        RecordGenerationPhaseTiming(batchState, "player-centric surface source build", sourceBuildStopwatch.Elapsed);
+        if (sourceBuildStopwatch.Elapsed.TotalMilliseconds > 0d)
+        {
+            LogGenerationPhaseTiming("player-centric surface source build", sourceBuildStopwatch.Elapsed);
+        }
+
+        UpdatePlayerCentricSurfaceVegetation(forceImmediate: true, batchState, totalStopwatch);
+    }
+
+    private IEnumerator BuildPlayerCentricSurfaceTileCacheOverMultipleFrames(
+        GeneratedTerrainBatchState batchState,
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        Stopwatch frameStopwatch,
+        float frameBudgetMilliseconds,
+        Action<PlayerCentricSurfaceTileCache?> assignCache,
+        Action<int, int> assignCounts)
+    {
+        PlayerCentricSurfaceTileCache? builtCache = BuildPlayerCentricSurfaceTileCache(batchState, terrain, request);
+        int cellCount = 0;
+        int placementCount = 0;
+        if (builtCache != null)
+        {
+            cellCount = builtCache.CellKeys.Count;
+            foreach (PlayerCentricSurfaceCellKey cellKey in builtCache.CellKeys)
+            {
+                if (playerCentricSurfaceCellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? cellSource))
+                {
+                    placementCount += cellSource.PlacementCount;
+                }
+            }
+        }
+
+        assignCache(builtCache);
+        assignCounts(cellCount, placementCount);
+        if (frameStopwatch.Elapsed.TotalMilliseconds >= frameBudgetMilliseconds)
+        {
+            frameStopwatch.Restart();
+            yield return null;
+        }
+    }
+
     private PlayerCentricSurfaceTileCache? BuildPlayerCentricSurfaceTileCache(
         GeneratedTerrainBatchState batchState,
         GStylizedTerrain terrain,
@@ -4086,7 +4426,7 @@ public sealed class TileLoader : MonoBehaviour
         var totalStopwatch = Stopwatch.StartNew();
         try
         {
-            EnsurePlayerCentricSurfaceCaches(batchState, totalStopwatch);
+            yield return EnsurePlayerCentricSurfaceCachesOverMultipleFrames(batchState, totalStopwatch);
             var queuePrepStopwatch = Stopwatch.StartNew();
             List<VegetationWorkItem> workItems = PrepareVegetationWorkItems(batchState, totalStopwatch);
             queuePrepStopwatch.Stop();
@@ -4152,6 +4492,11 @@ public sealed class TileLoader : MonoBehaviour
                     totalStopwatch.Elapsed);
                 LogGenerationPhaseTiming("vegetation placement (spread)", totalStopwatch.Elapsed);
                 FinishDeferredGenerationPhases(batchState);
+            }
+            else if (!completed)
+            {
+                DiscardPendingVegetationBuildOutputs(batchState);
+                ReleaseTerrainPhaseAfterAbortedBatch(batchState);
             }
         }
     }
