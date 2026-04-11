@@ -2,6 +2,7 @@ using UnityEngine;
 using WorldGen;
 #if GRIFFIN
 using Pinwheel.Griffin;
+using Pinwheel.Griffin.API;
 #endif
 
 #nullable enable
@@ -228,21 +229,27 @@ internal sealed class TileLoaderTerrainSampler
         {
             return false;
         }
-
-        Vector3 worldOrigin = terrain.transform.TransformPoint(new Vector3(localX, context.TerrainHeight + 32f, localZ));
-        if (!terrain.Raycast(new Ray(worldOrigin, Vector3.down), out RaycastHit terrainHit, context.TerrainHeight + 96f))
+        float clampedLocalX = Mathf.Clamp(localX, 0f, context.TerrainWidth);
+        float clampedLocalZ = Mathf.Clamp(localZ, 0f, context.TerrainLength);
+        Vector3 worldOrigin = terrain.transform.TransformPoint(new Vector3(clampedLocalX, context.TerrainHeight + 32f, clampedLocalZ));
+        if (!terrain.Raycast(new Ray(worldOrigin, Vector3.down), out RaycastHit hit, context.TerrainHeight + 96f))
         {
             return false;
         }
 
-        Vector3 worldPoint = terrainHit.point + terrain.transform.up * verticalOffset;
-        localPoint = terrain.transform.InverseTransformPoint(worldPoint);
-        localNormal = terrain.transform.InverseTransformDirection(terrainHit.normal).normalized;
-        if (localNormal.sqrMagnitude <= 0.0001f)
+        Vector3 hitLocalPoint = terrain.transform.InverseTransformPoint(hit.point);
+        Vector3 hitLocalNormal = terrain.transform.InverseTransformDirection(hit.normal).normalized;
+        if (hitLocalNormal.sqrMagnitude <= 0.0001f)
         {
-            localNormal = Vector3.up;
+            hitLocalNormal = Vector3.up;
+        }
+        else if (hitLocalNormal.y < 0f)
+        {
+            hitLocalNormal = -hitLocalNormal;
         }
 
+        localPoint = new Vector3(clampedLocalX, hitLocalPoint.y + verticalOffset, clampedLocalZ);
+        localNormal = hitLocalNormal;
         return true;
     }
 
@@ -326,5 +333,83 @@ internal sealed class TileLoaderTerrainSampler
     private float GetSurfaceObjectOffset()
     {
         return context.SurfaceObjectConformOffset;
+    }
+
+    private float SampleGeneratedTerrainHeight(Texture2D heightTexture, float localX, float localZ)
+    {
+        float sampleX = GetGeneratedTerrainSampleX(heightTexture, localX);
+        float sampleY = GetGeneratedTerrainSampleY(heightTexture, localZ);
+        float height01 = SampleGeneratedTerrainHeight01(heightTexture, sampleX, sampleY);
+        return height01 * context.TerrainHeight;
+    }
+
+    private Vector3 SampleGeneratedTerrainLocalNormal(Texture2D heightTexture, float localX, float localZ)
+    {
+        float stepX = Mathf.Max(0.5f, context.TerrainWidth / Mathf.Max(1f, heightTexture.width - 1f));
+        float stepZ = Mathf.Max(0.5f, context.TerrainLength / Mathf.Max(1f, heightTexture.height - 1f));
+        float leftX = Mathf.Clamp(localX - stepX, 0f, context.TerrainWidth);
+        float rightX = Mathf.Clamp(localX + stepX, 0f, context.TerrainWidth);
+        float backZ = Mathf.Clamp(localZ - stepZ, 0f, context.TerrainLength);
+        float forwardZ = Mathf.Clamp(localZ + stepZ, 0f, context.TerrainLength);
+        Vector3 pointLeft = new(leftX, SampleGeneratedTerrainHeight(heightTexture, leftX, localZ), localZ);
+        Vector3 pointRight = new(rightX, SampleGeneratedTerrainHeight(heightTexture, rightX, localZ), localZ);
+        Vector3 pointBack = new(localX, SampleGeneratedTerrainHeight(heightTexture, localX, backZ), backZ);
+        Vector3 pointForward = new(localX, SampleGeneratedTerrainHeight(heightTexture, localX, forwardZ), forwardZ);
+        Vector3 tangentX = pointRight - pointLeft;
+        Vector3 tangentZ = pointForward - pointBack;
+        Vector3 normal = Vector3.Cross(tangentX, tangentZ);
+        if (normal.sqrMagnitude <= 0.0001f)
+        {
+            return Vector3.up;
+        }
+
+        normal = normal.normalized;
+        return normal.y < 0f ? -normal : normal;
+    }
+
+    private float GetGeneratedTerrainSampleX(Texture2D heightTexture, float localX)
+    {
+        float normalizedX = context.TerrainWidth > 0f
+            ? Mathf.Clamp01(localX / context.TerrainWidth)
+            : 0f;
+        return normalizedX * Mathf.Max(0, heightTexture.width - 1);
+    }
+
+    private float GetGeneratedTerrainSampleY(Texture2D heightTexture, float localZ)
+    {
+        float normalizedY = context.TerrainLength > 0f
+            ? 1f - Mathf.Clamp01(localZ / context.TerrainLength)
+            : 0f;
+        return normalizedY * Mathf.Max(0, heightTexture.height - 1);
+    }
+
+    private static float SampleGeneratedTerrainHeight01(Texture2D heightTexture, float sampleX, float sampleY)
+    {
+        int x0 = Mathf.Clamp(Mathf.FloorToInt(sampleX), 0, heightTexture.width - 1);
+        int x1 = Mathf.Clamp(x0 + 1, 0, heightTexture.width - 1);
+        int y0 = Mathf.Clamp(Mathf.FloorToInt(sampleY), 0, heightTexture.height - 1);
+        int y1 = Mathf.Clamp(y0 + 1, 0, heightTexture.height - 1);
+        float tx = Mathf.Clamp01(sampleX - x0);
+        float ty = Mathf.Clamp01(sampleY - y0);
+        float h00 = DecodeGeneratedTerrainHeight01(heightTexture, x0, y0);
+        float h10 = DecodeGeneratedTerrainHeight01(heightTexture, x1, y0);
+        float h01 = DecodeGeneratedTerrainHeight01(heightTexture, x0, y1);
+        float h11 = DecodeGeneratedTerrainHeight01(heightTexture, x1, y1);
+        float hx0 = Mathf.Lerp(h00, h10, tx);
+        float hx1 = Mathf.Lerp(h01, h11, tx);
+        return Mathf.Lerp(hx0, hx1, ty);
+    }
+
+    private static float DecodeGeneratedTerrainHeight01(Texture2D heightTexture, int logicalX, int logicalY)
+    {
+        int clampedX = Mathf.Clamp(logicalX, 0, heightTexture.width - 1);
+        int clampedY = Mathf.Clamp(logicalY, 0, heightTexture.height - 1);
+        int flippedY = heightTexture.height - 1 - clampedY;
+        Color sample = heightTexture.GetPixel(clampedX, flippedY);
+        float height01 = 0f;
+        float subdiv01 = 0f;
+        float visibility01 = 0f;
+        Polaris.DecodeHeightMapSample(sample, ref height01, ref subdiv01, ref visibility01);
+        return height01;
     }
 }

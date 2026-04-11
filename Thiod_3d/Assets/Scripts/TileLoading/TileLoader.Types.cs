@@ -216,6 +216,8 @@ internal readonly struct GeneratedTerrainRequest
     public double LocalMinHeight { get; }
     public double LocalMaxHeight { get; }
     public double TileHilliness { get; }
+
+    public Vector2Int TileCoordinate => new(UnityTileX, UnityTileY);
 }
 
 internal sealed class HybridVegetationBuildState
@@ -355,6 +357,7 @@ internal readonly struct PreparedPlacementGeometry
         Vector3 worldPosition,
         float distanceToTargetSq,
         VegetationDensityZone densityZone,
+        bool isSeamRisk,
         bool useExactTerrainConformOnLoad,
         bool useExactTerrainConformOnPromotion)
     {
@@ -363,6 +366,7 @@ internal readonly struct PreparedPlacementGeometry
         WorldPosition = worldPosition;
         DistanceToTargetSq = distanceToTargetSq;
         DensityZone = densityZone;
+        IsSeamRisk = isSeamRisk;
         UseExactTerrainConformOnLoad = useExactTerrainConformOnLoad;
         UseExactTerrainConformOnPromotion = useExactTerrainConformOnPromotion;
     }
@@ -372,6 +376,7 @@ internal readonly struct PreparedPlacementGeometry
     public Vector3 WorldPosition { get; }
     public float DistanceToTargetSq { get; }
     public VegetationDensityZone DensityZone { get; }
+    public bool IsSeamRisk { get; }
     public bool UseExactTerrainConformOnLoad { get; }
     public bool UseExactTerrainConformOnPromotion { get; }
 
@@ -383,6 +388,7 @@ internal readonly struct PreparedPlacementGeometry
             WorldPosition,
             DistanceToTargetSq,
             DensityZone,
+            IsSeamRisk,
             UseExactTerrainConformOnLoad,
             UseExactTerrainConformOnPromotion);
     }
@@ -776,7 +782,9 @@ internal sealed class GeneratedTerrainBatchState
         string cacheSignature,
         int pipelineId,
         Vector3Int centerTileCoordinate,
+        Vector3 batchRootLocalPosition,
         IReadOnlyList<GeneratedTerrainRequest> requests,
+        IReadOnlyList<Vector2Int> orderedTileCoordinates,
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
@@ -784,13 +792,16 @@ internal sealed class GeneratedTerrainBatchState
         CacheSignature = cacheSignature;
         PipelineId = pipelineId;
         CenterTileCoordinate = centerTileCoordinate;
+        BatchRootLocalPosition = batchRootLocalPosition;
         Requests = requests?.ToArray() ?? Array.Empty<GeneratedTerrainRequest>();
+        OrderedTileCoordinates = orderedTileCoordinates?.ToArray() ?? Array.Empty<Vector2Int>();
         NormalizationMinHeight = normalizationMinHeight;
         NormalizationMaxHeight = normalizationMaxHeight;
         ActiveTerrains = new List<GStylizedTerrain>(Requests.Count);
         CreatedTerrains = new List<GStylizedTerrain>(Requests.Count);
         CreatedRequests = new List<GeneratedTerrainRequest>(Requests.Count);
         TerrainByCoordinate = new Dictionary<Vector2Int, GStylizedTerrain>();
+        RequestsByCoordinate = new Dictionary<Vector2Int, GeneratedTerrainRequest>();
         NextDeferredPhase = DeferredGenerationPhase.RiverWater;
         RiverSplineCache = new Dictionary<string, Spline>(StringComparer.Ordinal);
         RiverRefreshRequests = new List<GeneratedTerrainRequest>(Requests.Count);
@@ -803,19 +814,28 @@ internal sealed class GeneratedTerrainBatchState
         MissingPrefabCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         VegetationQueuedPlacementsByBucket = new Dictionary<string, int>(StringComparer.Ordinal);
         VegetationQueuedWorkItemsByBucket = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        for (int i = 0; i < Requests.Count; i++)
+        {
+            GeneratedTerrainRequest request = Requests[i];
+            RequestsByCoordinate[request.TileCoordinate] = request;
+        }
     }
 
     public string CacheKey { get; }
     public string CacheSignature { get; }
     public int PipelineId { get; }
     public Vector3Int CenterTileCoordinate { get; }
+    public Vector3 BatchRootLocalPosition { get; }
     public IReadOnlyList<GeneratedTerrainRequest> Requests { get; }
+    public IReadOnlyList<Vector2Int> OrderedTileCoordinates { get; }
     public double NormalizationMinHeight { get; }
     public double NormalizationMaxHeight { get; }
     public List<GStylizedTerrain> ActiveTerrains { get; }
     public List<GStylizedTerrain> CreatedTerrains { get; }
     public List<GeneratedTerrainRequest> CreatedRequests { get; }
     public Dictionary<Vector2Int, GStylizedTerrain> TerrainByCoordinate { get; }
+    public Dictionary<Vector2Int, GeneratedTerrainRequest> RequestsByCoordinate { get; }
     public Transform? BatchRoot { get; set; }
     public DeferredGenerationPhase NextDeferredPhase { get; set; }
     public Dictionary<string, Spline> RiverSplineCache { get; }
@@ -897,24 +917,30 @@ internal sealed class GeneratedTerrainBatchCacheEntry
         string cacheKey,
         string cacheSignature,
         Vector3Int centerTileCoordinate,
+        Vector3 batchRootLocalPosition,
         double normalizationMinHeight,
         double normalizationMaxHeight,
-        IReadOnlyList<GeneratedTerrainRequest> requests)
+        IReadOnlyList<GeneratedTerrainRequest> requests,
+        IReadOnlyList<Vector2Int> orderedTileCoordinates)
     {
         CacheKey = cacheKey;
         CacheSignature = cacheSignature;
         CenterTileCoordinate = centerTileCoordinate;
+        BatchRootLocalPosition = batchRootLocalPosition;
         NormalizationMinHeight = normalizationMinHeight;
         NormalizationMaxHeight = normalizationMaxHeight;
         Requests = requests?.ToArray() ?? Array.Empty<GeneratedTerrainRequest>();
+        OrderedTileCoordinates = orderedTileCoordinates?.ToArray() ?? Array.Empty<Vector2Int>();
     }
 
     public string CacheKey { get; }
     public string CacheSignature { get; }
     public Vector3Int CenterTileCoordinate { get; }
+    public Vector3 BatchRootLocalPosition { get; }
     public double NormalizationMinHeight { get; }
     public double NormalizationMaxHeight { get; }
     public IReadOnlyList<GeneratedTerrainRequest> Requests { get; }
+    public IReadOnlyList<Vector2Int> OrderedTileCoordinates { get; }
 
     public GeneratedTerrainBatchState CreateState(int pipelineId)
     {
@@ -923,7 +949,9 @@ internal sealed class GeneratedTerrainBatchCacheEntry
             CacheSignature,
             pipelineId,
             CenterTileCoordinate,
+            BatchRootLocalPosition,
             Requests,
+            OrderedTileCoordinates,
             NormalizationMinHeight,
             NormalizationMaxHeight);
     }

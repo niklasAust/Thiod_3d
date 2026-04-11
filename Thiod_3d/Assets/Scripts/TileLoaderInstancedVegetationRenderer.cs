@@ -547,7 +547,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         instance.transform.localScale = placement.LocalScale;
         if (placement.ConformToTerrainOnPromotion)
         {
-            ConformPromotedPlacementToTerrain(instance.transform, placement);
+            ConformPromotedPlacementToTerrain(instance.transform, placement, prototype.IsTree);
         }
 
         TileLoaderPromotedVegetationInstance marker = instance.GetComponent<TileLoaderPromotedVegetationInstance>();
@@ -563,7 +563,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
     private void ConformPromotedPlacementToTerrain(
         Transform promotedTransform,
-        TileLoaderInstancedVegetationPlacement placement)
+        TileLoaderInstancedVegetationPlacement placement,
+        bool isTreeObject)
     {
         if (promotedTransform == null)
         {
@@ -577,23 +578,75 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             return;
         }
 
-        Vector3 worldOrigin = transform.TransformPoint(
-            new Vector3(
+        if (!TrySampleGeneratedTerrainSurface(
+                terrain,
                 placement.SurfaceSampleLocalX,
-                Mathf.Max(placement.LocalPosition.y + 32f, 64f),
-                placement.SurfaceSampleLocalZ));
-        if (!terrain.Raycast(new Ray(worldOrigin, Vector3.down), out RaycastHit terrainHit, 512f))
+                placement.SurfaceSampleLocalZ,
+                placement.SurfaceVerticalOffset,
+                out Vector3 localSurfacePoint,
+                out Vector3 localSurfaceNormal))
         {
             return;
         }
 
-        promotedTransform.rotation = Quaternion.FromToRotation(Vector3.up, terrainHit.normal);
-        promotedTransform.position =
-            terrainHit.point +
-            terrain.transform.up * placement.SurfaceVerticalOffset +
-            terrainHit.normal * placement.SurfaceNormalOffset;
+        Vector3 worldSurfacePoint = terrain.transform.TransformPoint(localSurfacePoint);
+        Vector3 worldSurfaceNormal = terrain.transform.TransformDirection(localSurfaceNormal).normalized;
+        if (!isTreeObject)
+        {
+            promotedTransform.rotation = Quaternion.FromToRotation(Vector3.up, worldSurfaceNormal);
+            promotedTransform.position =
+                worldSurfacePoint +
+                worldSurfaceNormal * placement.SurfaceNormalOffset;
+            return;
+        }
+
+        promotedTransform.position = worldSurfacePoint;
 #endif
     }
+
+#if GRIFFIN
+    private static bool TrySampleGeneratedTerrainSurface(
+        GStylizedTerrain terrain,
+        float localX,
+        float localZ,
+        float verticalOffset,
+        out Vector3 localPoint,
+        out Vector3 localNormal)
+    {
+        localPoint = default;
+        localNormal = Vector3.up;
+        float terrainWidth = terrain.TerrainData?.Geometry?.Width ?? 0f;
+        float terrainLength = terrain.TerrainData?.Geometry?.Length ?? 0f;
+        float terrainHeight = terrain.TerrainData?.Geometry?.Height ?? 0f;
+        if (terrainWidth <= 0f || terrainLength <= 0f || terrainHeight <= 0f)
+        {
+            return false;
+        }
+
+        float clampedLocalX = Mathf.Clamp(localX, 0f, terrainWidth);
+        float clampedLocalZ = Mathf.Clamp(localZ, 0f, terrainLength);
+        Vector3 worldOrigin = terrain.transform.TransformPoint(new Vector3(clampedLocalX, terrainHeight + 32f, clampedLocalZ));
+        if (!terrain.Raycast(new Ray(worldOrigin, Vector3.down), out RaycastHit hit, terrainHeight + 96f))
+        {
+            return false;
+        }
+
+        Vector3 hitLocalPoint = terrain.transform.InverseTransformPoint(hit.point);
+        Vector3 hitLocalNormal = terrain.transform.InverseTransformDirection(hit.normal).normalized;
+        if (hitLocalNormal.sqrMagnitude <= 0.0001f)
+        {
+            hitLocalNormal = Vector3.up;
+        }
+        else if (hitLocalNormal.y < 0f)
+        {
+            hitLocalNormal = -hitLocalNormal;
+        }
+
+        localPoint = new Vector3(clampedLocalX, hitLocalPoint.y + verticalOffset, clampedLocalZ);
+        localNormal = hitLocalNormal;
+        return true;
+    }
+#endif
 
     private void DemotePlacement(int placementIndex)
     {

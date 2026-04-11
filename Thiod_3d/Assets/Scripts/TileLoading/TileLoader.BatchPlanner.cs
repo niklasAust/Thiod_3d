@@ -56,6 +56,7 @@ internal sealed class TileLoaderBatchPlanner
         var requests = new List<GeneratedTerrainRequest>();
         double batchMinHeight = double.MaxValue;
         double batchMaxHeight = double.MinValue;
+        Vector3 batchRootLocalPosition = GetBatchRootLocalPosition(context.UnityTileCoordinate);
 
         if (context.UseBatchNeighborhoodLoading)
         {
@@ -116,6 +117,8 @@ internal sealed class TileLoaderBatchPlanner
         }
 
         string populatedCacheKey = BuildGeneratedTerrainBatchCacheKey(cacheSignature);
+        SortTerrainRequests(requests, context.UnityTileCoordinate);
+        Vector2Int[] orderedTileCoordinates = BuildOrderedTileCoordinates(requests);
         if (requests.Count == 0)
         {
             return new GeneratedTerrainBatchState(
@@ -123,7 +126,9 @@ internal sealed class TileLoaderBatchPlanner
                 cacheSignature,
                 pipelineId,
                 context.UnityTileCoordinate,
+                batchRootLocalPosition,
                 Array.Empty<GeneratedTerrainRequest>(),
+                Array.Empty<Vector2Int>(),
                 loadedWorldData.GlobalMinHeight,
                 loadedWorldData.GlobalMaxHeight);
         }
@@ -134,9 +139,11 @@ internal sealed class TileLoaderBatchPlanner
             populatedCacheKey,
             cacheSignature,
             context.UnityTileCoordinate,
+            batchRootLocalPosition,
             normalizationMinHeight,
             normalizationMaxHeight,
-            requests);
+            requests,
+            orderedTileCoordinates);
 
         return cachedTerrainBatch.CreateState(pipelineId);
     }
@@ -245,6 +252,7 @@ internal sealed class TileLoaderBatchPlanner
         double batchMinHeight = double.MaxValue;
         double batchMaxHeight = double.MinValue;
         int reusedRequestCount = 0;
+        Vector3 batchRootLocalPosition = GetBatchRootLocalPosition(context.UnityTileCoordinate);
 
         for (int offsetY = -1; offsetY <= 1; offsetY++)
         {
@@ -269,15 +277,20 @@ internal sealed class TileLoaderBatchPlanner
             }
         }
 
+        SortTerrainRequests(requests, context.UnityTileCoordinate);
+        Vector2Int[] orderedTileCoordinates = BuildOrderedTileCoordinates(requests);
+
         double normalizationMinHeight = Math.Min(loadedWorldData.GlobalMinHeight, batchMinHeight);
         double normalizationMaxHeight = Math.Max(loadedWorldData.GlobalMaxHeight, batchMaxHeight);
         cachedTerrainBatch = new GeneratedTerrainBatchCacheEntry(
             cacheKey,
             cacheSignature,
             context.UnityTileCoordinate,
+            batchRootLocalPosition,
             normalizationMinHeight,
             normalizationMaxHeight,
-            requests);
+            requests,
+            orderedTileCoordinates);
 
         GeneratedTerrainBatchState batchState = cachedTerrainBatch.CreateState(pipelineId);
         batchState.ReusedRequestCount = reusedRequestCount;
@@ -332,5 +345,71 @@ internal sealed class TileLoaderBatchPlanner
         }
 
         return $"{context.GeneratedTerrainName}_{unityTileX}_{unityTileY}";
+    }
+
+    private Vector3 GetBatchRootLocalPosition(Vector3Int centerTileCoordinate)
+    {
+        if (!Application.isPlaying || !context.DynamicTileLoadingEnabled)
+        {
+            return Vector3.zero;
+        }
+
+        return new Vector3(
+            centerTileCoordinate.x * context.TerrainWidth,
+            0f,
+            centerTileCoordinate.y * context.TerrainLength);
+    }
+
+    private static Vector2Int[] BuildOrderedTileCoordinates(IReadOnlyList<GeneratedTerrainRequest> requests)
+    {
+        var orderedTileCoordinates = new Vector2Int[requests.Count];
+        for (int i = 0; i < requests.Count; i++)
+        {
+            orderedTileCoordinates[i] = requests[i].TileCoordinate;
+        }
+
+        return orderedTileCoordinates;
+    }
+
+    private static void SortTerrainRequests(List<GeneratedTerrainRequest> requests, Vector3Int centerTileCoordinate)
+    {
+        requests.Sort((left, right) =>
+            CompareTerrainRequestOrder(left, right, centerTileCoordinate));
+    }
+
+    private static int CompareTerrainRequestOrder(
+        GeneratedTerrainRequest left,
+        GeneratedTerrainRequest right,
+        Vector3Int centerTileCoordinate)
+    {
+        int leftRank = GetNeighborhoodOrderRank(left.TileCoordinate, centerTileCoordinate);
+        int rightRank = GetNeighborhoodOrderRank(right.TileCoordinate, centerTileCoordinate);
+        if (leftRank != rightRank)
+        {
+            return leftRank.CompareTo(rightRank);
+        }
+
+        int yComparison = left.UnityTileY.CompareTo(right.UnityTileY);
+        if (yComparison != 0)
+        {
+            return yComparison;
+        }
+
+        return left.UnityTileX.CompareTo(right.UnityTileX);
+    }
+
+    private static int GetNeighborhoodOrderRank(Vector2Int tileCoordinate, Vector3Int centerTileCoordinate)
+    {
+        int offsetX = tileCoordinate.x - centerTileCoordinate.x;
+        int offsetY = tileCoordinate.y - centerTileCoordinate.y;
+        bool insideNeighborhood =
+            offsetX >= -1 && offsetX <= 1 &&
+            offsetY >= -1 && offsetY <= 1;
+        if (insideNeighborhood)
+        {
+            return (offsetY + 1) * 3 + (offsetX + 1);
+        }
+
+        return 100 + Math.Abs(offsetY) * 10 + Math.Abs(offsetX);
     }
 }
