@@ -3451,49 +3451,6 @@ public sealed class TileLoader : MonoBehaviour
             riverSplineCache));
     }
 
-    private void PopulateVegetation(
-        IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
-        IReadOnlyList<GStylizedTerrain> terrains,
-        double normalizationMinHeight,
-        double normalizationMaxHeight)
-    {
-        if (!placeTreeObjects && !placeSurfaceObjects)
-        {
-            return;
-        }
-
-        int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
-        if (UsesLegacyVegetationObjects())
-        {
-            MeasureGenerationPhase(
-                VegetationRenderMarker,
-                "vegetation GameObject instantiation",
-                () =>
-                {
-                    for (int i = 0; i < terrainCount; i++)
-                    {
-                        GeneratedTerrainRequest request = terrainRequests[i];
-                        GStylizedTerrain terrain = terrains[i];
-                        PopulatePlacedObjectsLegacy(terrain, request, normalizationMinHeight, normalizationMaxHeight);
-                    }
-                });
-            return;
-        }
-
-        MeasureGenerationPhase(
-            VegetationRenderMarker,
-            "vegetation instancing",
-            () =>
-            {
-                for (int i = 0; i < terrainCount; i++)
-                {
-                    GeneratedTerrainRequest request = terrainRequests[i];
-                    GStylizedTerrain terrain = terrains[i];
-                    PopulatePlacedObjectsHybrid(terrain, request, normalizationMinHeight, normalizationMaxHeight);
-                }
-            });
-    }
-
     private void EnsurePlayerCentricSurfaceCaches(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch)
     {
         if (!ShouldUsePlayerCentricSurfaceVegetation())
@@ -4211,13 +4168,7 @@ public sealed class TileLoader : MonoBehaviour
         capApplicationMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
 
         phaseStopwatch.Restart();
-        preparedPlacements.Sort((left, right) =>
-        {
-            int bucketCompare = left.PriorityBucket.CompareTo(right.PriorityBucket);
-            return bucketCompare != 0
-                ? bucketCompare
-                : left.StableHash.CompareTo(right.StableHash);
-        });
+        preparedPlacements.Sort(ComparePreparedVegetationPlacementOrder);
         sortMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
 
         phaseStopwatch.Restart();
@@ -4562,13 +4513,36 @@ public sealed class TileLoader : MonoBehaviour
     {
         return bucket switch
         {
-            VegetationPriorityBucket.CenterCanopyAndLarge => 160,
-            VegetationPriorityBucket.OuterCanopyAndLarge => 224,
+            VegetationPriorityBucket.CenterCanopyAndLarge => 128,
+            VegetationPriorityBucket.OuterCanopyAndLarge => 160,
             VegetationPriorityBucket.CenterClutterAndGround => 192,
             VegetationPriorityBucket.OuterClutter => 192,
             VegetationPriorityBucket.OuterGroundAndDebris => 192,
             _ => 192,
         };
+    }
+
+    private static int ComparePreparedVegetationPlacementOrder(
+        PreparedVegetationPlacement left,
+        PreparedVegetationPlacement right)
+    {
+        int bucketCompare = left.PriorityBucket.CompareTo(right.PriorityBucket);
+        if (bucketCompare != 0)
+        {
+            return bucketCompare;
+        }
+
+        if (left.PriorityBucket == VegetationPriorityBucket.CenterCanopyAndLarge ||
+            left.PriorityBucket == VegetationPriorityBucket.OuterCanopyAndLarge)
+        {
+            int distanceCompare = right.Geometry.DistanceToTargetSq.CompareTo(left.Geometry.DistanceToTargetSq);
+            if (distanceCompare != 0)
+            {
+                return distanceCompare;
+            }
+        }
+
+        return left.StableHash.CompareTo(right.StableHash);
     }
 
     private bool TryBuildPreparedPlacementGeometry(
@@ -4750,8 +4724,8 @@ public sealed class TileLoader : MonoBehaviour
 
         return streamingTier switch
         {
-            TileObjectStreamingTier.Canopy => 0.6f,
-            TileObjectStreamingTier.Large => 0.6f,
+            TileObjectStreamingTier.Canopy => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
+            TileObjectStreamingTier.Large => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
             TileObjectStreamingTier.Clutter => densityZone == VegetationDensityZone.Mid ? 0.35f : 0.1f,
             TileObjectStreamingTier.Ground => densityZone == VegetationDensityZone.Mid ? 0.15f : 0f,
             _ => 1f,
@@ -4970,31 +4944,6 @@ public sealed class TileLoader : MonoBehaviour
         }
     }
 
-    private void PopulatePlacedObjectsHybrid(
-        GStylizedTerrain terrain,
-        GeneratedTerrainRequest request,
-        double normalizationMinHeight,
-        double normalizationMaxHeight)
-    {
-        HybridVegetationBuildState? buildState = BeginHybridVegetationBuild(
-            null,
-            terrain,
-            request,
-            normalizationMinHeight,
-            normalizationMaxHeight);
-        if (buildState == null)
-        {
-            return;
-        }
-
-        while (ProcessNextHybridVegetationPlacement(buildState))
-        {
-        }
-
-        FinalizeHybridVegetationBuild(buildState);
-        FinalizeVegetationBuildOutput(buildState);
-    }
-
     private HybridVegetationBuildState? BeginHybridVegetationBuild(
         GeneratedTerrainBatchState? batchState,
         GStylizedTerrain terrain,
@@ -5014,104 +4963,6 @@ public sealed class TileLoader : MonoBehaviour
             FindVegetationContainer(terrain.transform),
             normalizationMinHeight,
             normalizationMaxHeight);
-    }
-
-    private HybridVegetationBuildState? BeginHybridVegetationBuild(
-        GStylizedTerrain terrain,
-        GeneratedTerrainRequest request,
-        double normalizationMinHeight,
-        double normalizationMaxHeight)
-    {
-        return BeginHybridVegetationBuild(
-            null,
-            terrain,
-            request,
-            normalizationMinHeight,
-            normalizationMaxHeight);
-    }
-
-    private bool ProcessNextHybridVegetationPlacement(HybridVegetationBuildState buildState)
-    {
-        IReadOnlyList<TileObjectPlacement> placedObjects = buildState.Request.Layers.PlacedObjects;
-        if (buildState.NextPlacementIndex >= placedObjects.Count)
-        {
-            return false;
-        }
-
-        TileObjectPlacement placement = placedObjects[buildState.NextPlacementIndex];
-        buildState.NextPlacementIndex++;
-        if (ShouldUsePlayerCentricSurfaceVegetation() &&
-            IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier))
-        {
-            return buildState.NextPlacementIndex < placedObjects.Count;
-        }
-
-        GameObject? prefab = LoadPrefabForPlacement(placement);
-        if (prefab == null)
-        {
-            return buildState.NextPlacementIndex < placedObjects.Count;
-        }
-
-        bool isTreeObject = IsTreePlacement(placement, prefab);
-        if (isTreeObject && !placeTreeObjects)
-        {
-            return buildState.NextPlacementIndex < placedObjects.Count;
-        }
-
-        if (!isTreeObject && !placeSurfaceObjects)
-        {
-            return buildState.NextPlacementIndex < placedObjects.Count;
-        }
-
-        bool requiresInstancingOnly = RequiresInstancingOnly(placement);
-        TileLoaderInstancedVegetationPrototype? prototype = GetOrCreateVegetationPrototype(placement, prefab, isTreeObject);
-        if (prototype != null &&
-            TryBuildInstancedPlacement(
-                buildState.Terrain,
-                buildState.Request,
-                placement,
-                prototype,
-                buildState.NormalizationMinHeight,
-                buildState.NormalizationMaxHeight,
-                out TileLoaderInstancedVegetationPlacement instancedPlacement))
-        {
-            buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
-            if (!buildState.PrototypeIndices.TryGetValue(prototype.Key, out int prototypeIndex))
-            {
-                prototypeIndex = buildState.Prototypes.Count;
-                buildState.PrototypeIndices[prototype.Key] = prototypeIndex;
-                buildState.Prototypes.Add(prototype);
-            }
-
-            buildState.Placements.Add(new TileLoaderInstancedVegetationPlacement(
-                prototypeIndex,
-                instancedPlacement.LocalPosition,
-                instancedPlacement.LocalRotation,
-                instancedPlacement.LocalScale,
-                instancedPlacement.ConformToTerrainOnPromotion,
-                instancedPlacement.SurfaceSampleLocalX,
-                instancedPlacement.SurfaceSampleLocalZ,
-                instancedPlacement.SurfaceVerticalOffset,
-                instancedPlacement.SurfaceNormalOffset));
-            return buildState.NextPlacementIndex < placedObjects.Count;
-        }
-
-        if (vegetationLoadMode == VegetationLoadMode.InstancesOnly || requiresInstancingOnly)
-        {
-            return buildState.NextPlacementIndex < placedObjects.Count;
-        }
-
-        buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
-        InstantiateLegacyPlacement(
-            buildState.Terrain,
-            buildState.Request,
-            placement,
-            prefab,
-            isTreeObject,
-            buildState.VegetationContainer,
-            buildState.NormalizationMinHeight,
-            buildState.NormalizationMaxHeight);
-        return buildState.NextPlacementIndex < placedObjects.Count;
     }
 
     private double FinalizeHybridVegetationBuild(HybridVegetationBuildState buildState)
@@ -5623,69 +5474,6 @@ public sealed class TileLoader : MonoBehaviour
     private static Renderer[] FilterUsableInstancedRenderers(Renderer[]? renderers)
     {
         return TileLoaderVegetationPrototypeFactory.FilterUsableInstancedRenderers(renderers);
-    }
-
-    private bool TryBuildInstancedPlacement(
-        GStylizedTerrain? terrain,
-        GeneratedTerrainRequest request,
-        TileObjectPlacement placement,
-        TileLoaderInstancedVegetationPrototype prototype,
-        double normalizationMinHeight,
-        double normalizationMaxHeight,
-        out TileLoaderInstancedVegetationPlacement instancedPlacement)
-    {
-        instancedPlacement = default;
-        if (prototype == null)
-        {
-            return false;
-        }
-
-        Vector3 localPosition;
-        Quaternion localRotation;
-        if (prototype.IsTree)
-        {
-            localPosition = GetTerrainLocalPoint(
-                terrain,
-                request.Layers.Heightmap,
-                placement.X,
-                placement.Y,
-                normalizationMinHeight,
-                normalizationMaxHeight,
-                treeObjectVerticalOffset);
-            localRotation = Quaternion.identity;
-        }
-        else
-        {
-            Vector3 localSurfacePoint = GetTerrainLocalPoint(
-                terrain,
-                request.Layers.Heightmap,
-                placement.X,
-                placement.Y,
-                normalizationMinHeight,
-                normalizationMaxHeight,
-                surfaceObjectVerticalOffset);
-            Vector3 localSurfaceNormal = GetTerrainLocalNormal(
-                terrain,
-                request.Layers.Heightmap,
-                placement.X,
-                placement.Y,
-                normalizationMinHeight,
-                normalizationMaxHeight);
-            localRotation = Quaternion.FromToRotation(Vector3.up, localSurfaceNormal);
-            localPosition = localSurfacePoint + localSurfaceNormal * GetSurfaceObjectOffset();
-        }
-
-        instancedPlacement = new TileLoaderInstancedVegetationPlacement(
-            0,
-            localPosition,
-            localRotation,
-            Vector3.one,
-            !prototype.IsTree,
-            localPosition.x,
-            localPosition.z,
-            surfaceObjectVerticalOffset,
-            GetSurfaceObjectOffset());
-        return true;
     }
 
     private static GameObject? InstantiatePlacementPrefab(GameObject prefab)
