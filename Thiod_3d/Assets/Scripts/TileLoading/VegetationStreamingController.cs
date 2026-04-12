@@ -597,6 +597,7 @@ internal sealed class VegetationStreamingController
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
         owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        owner.ClearGeneratedRiverOutputsInternal(batchState.RiverRefreshTerrains);
         var riverWaterSeams = new Dictionary<string, RiverWaterSeamCrossSection>(StringComparer.Ordinal);
         int terrainCount = Math.Min(batchState.RiverRefreshRequests.Count, batchState.RiverRefreshTerrains.Count);
         for (int i = 0; i < terrainCount; i++)

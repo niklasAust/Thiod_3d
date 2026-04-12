@@ -99,8 +99,6 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _invertNormalsForBackFace: 0
-    - _Backface_Darken: 1
     - _AlphaClip: 1
     - _AlphaCutoff: 0.5
     - _AlphaToMask: 1
@@ -116,6 +114,7 @@ Material:
     - _BUILTIN_ZTest: 4
     - _BUILTIN_ZWrite: 1
     - _BUILTIN_ZWriteControl: 0
+    - _Backface_Darken: 1
     - _Big_Wave: 10
     - _Big_WindAmount: 1.22
     - _Big_Windspeed: 1.84
@@ -231,7 +230,7 @@ Material:
     - _Trunk_Smoothness: 0.2
     - _UVSec: 0
     - _Use_Color_Noise: 1
-    - _Use_Global_Weather_Controller: 1
+    - _Use_Global_Weather_Controller: 0
     - _Use_Vertex_Color_Wind: 1
     - _WindAmount: 1
     - _WindBaseline: 0
@@ -249,6 +248,7 @@ Material:
     - _ZWrite: 1
     - _ZWriteControl: 0
     - __dirty: 0
+    - _invertNormalsForBackFace: 0
     - _leafNoiseScale: 1
     - _minimum: 0
     - _noiseAmount: 0.189
@@ -317,5 +317,3 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   version: 10
-
-

@@ -340,7 +340,7 @@
         "outerTileDensityScale": 0.25,
         "loadDistanceMeters": 70,
         "maxPlacementsPerTile": 192,
-        "prefab": "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Tall_Clump_04.prefab",
+        "prefab": "Assets/Synty/PolygonNatureBiomes/PNB_Meadow_Forest/Prefabs/SM_Env_Grass_Tall_Clump_03_2.prefab",
         "previewColour": "#55FF55"
     },
     "vegetation.blueberry_bush": {
@@ -364,7 +364,7 @@
         "outerTileDensityScale": 0.0,
         "loadDistanceMeters": 65,
         "maxPlacementsPerTile": 96,
-        "prefab": "Assets/CustomAssets/nettle.prefab",
+        "prefab": "Assets/CustomAssets/nettle_group.prefab",
         "previewColour": "#79B24A"
     }
 }
