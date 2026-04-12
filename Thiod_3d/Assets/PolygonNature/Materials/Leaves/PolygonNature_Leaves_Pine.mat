@@ -167,8 +167,8 @@ Material:
     - _ZWrite: 1
     - __dirty: 1
     m_Colors:
-    - Color_369F793F: {r: 1, g: 1, b: 1, a: 0}
-    - Color_FA85148A: {r: 0.27004272, g: 0.735849, b: 0.10065861, a: 0}
+    - Color_369F793F: {r: 0.695, g: 0.695, b: 0.695, a: 1}
+    - Color_FA85148A: {r: 0, g: 0, b: 0, a: 0}
     - Vector2_3D1D1E3D: {r: 1, g: 0, b: 0, a: 0}
     - Vector2_B578DC94: {r: 1, g: 0, b: 0, a: 0}
     - _Color: {r: 1, g: 1, b: 1, a: 1}
