@@ -174,6 +174,7 @@ internal sealed class TerrainSceneFacade
 
         owner.LogBatchCenterDriftIfNeededInternal("terrain batch promotion", batchState);
         var previousTileCache = new Dictionary<Vector2Int, GeneratedTerrainTileData>(activeTerrainTileCache);
+        string? previousTileCacheSignature = activeTerrainTileCacheSignature;
         activeGeneratedTerrainRoot = batchState.BatchRoot;
         owner.SetActiveLoadedUnityTileCoordinateInternal(batchState.CenterTileCoordinate);
         activeTerrainTileCache.Clear();
@@ -209,6 +210,9 @@ internal sealed class TerrainSceneFacade
         }
 
         activeTerrainTileCacheSignature = batchState.CacheSignature;
+        owner.SyncRuntimeVegetationTileStatusesInternal(
+            activeTerrainTileCache.Keys,
+            preserveExistingStatuses: string.Equals(previousTileCacheSignature, batchState.CacheSignature, StringComparison.Ordinal));
         owner.PrunePlayerCentricSurfaceTileCachesInternal(activeTerrainTileCache.Keys);
         owner.ValidateBatchTerrainOrderingInternal(batchState, "terrain batch promotion");
         RetireGeneratedTerrainContainers(exceptRoot: batchState.BatchRoot);

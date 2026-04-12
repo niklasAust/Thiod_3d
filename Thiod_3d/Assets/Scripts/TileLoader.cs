@@ -264,6 +264,7 @@ public sealed partial class TileLoader : MonoBehaviour
     private Vector3Int? activeLoadedUnityTileCoordinate;
     private Vector3Int? activeRuntimeRequestedTileCoordinate;
     private Vector3? lastVegetationStreamingTargetWorldPosition;
+    private readonly Dictionary<Vector2Int, VegetationTileStreamingStatus> runtimeVegetationTileStatusByCoordinate = new();
     private static readonly Dictionary<string, CachedLoadedWorldData> LoadedWorldDataCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ProfilerMarker BatchWorldgenMarker = new("TileLoader.BatchWorldgen");
     private static readonly ProfilerMarker TerrainCreationMarker = new("TileLoader.TerrainCreation");
@@ -409,12 +410,23 @@ public sealed partial class TileLoader : MonoBehaviour
     internal PlayerCentricSurfaceController SurfaceController => playerCentricSurfaceController ??= new PlayerCentricSurfaceController(this);
     internal GenerationReporter Reporter => generationReporter ??= new GenerationReporter(this);
     internal TileLoaderFrameBudgetCoordinator RuntimeFrameBudgetCoordinator => runtimeFrameBudgetCoordinator ??= new TileLoaderFrameBudgetCoordinator();
+    internal bool IsRuntimeVegetationTileSettledInternal(Vector2Int tileCoordinate)
+        => runtimeVegetationTileStatusByCoordinate.TryGetValue(tileCoordinate, out VegetationTileStreamingStatus status) &&
+           status == VegetationTileStreamingStatus.Settled;
+    internal void MarkRuntimeVegetationTilePendingInternal(Vector2Int tileCoordinate)
+        => MarkRuntimeVegetationTileStatus(tileCoordinate, VegetationTileStreamingStatus.Pending, preserveSettled: true);
+    internal void MarkRuntimeVegetationTileSettledInternal(Vector2Int tileCoordinate)
+        => MarkRuntimeVegetationTileStatus(tileCoordinate, VegetationTileStreamingStatus.Settled, preserveSettled: false);
+    internal void SyncRuntimeVegetationTileStatusesInternal(IEnumerable<Vector2Int> activeTileCoordinates, bool preserveExistingStatuses)
+        => SyncRuntimeVegetationTileStatuses(activeTileCoordinates, preserveExistingStatuses);
+    internal void ClearRuntimeVegetationTileStatusesInternal() => runtimeVegetationTileStatusByCoordinate.Clear();
 
     internal void ResetRuntimeLifecycleState()
     {
         hasLoadedInCurrentEnableCycle = false;
         cachedTerrainSampler = null;
         lastVegetationStreamingTargetWorldPosition = null;
+        runtimeVegetationTileStatusByCoordinate.Clear();
         terrainSceneFacade ??= new TerrainSceneFacade(this);
         terrainStreamingPipeline ??= new TerrainStreamingPipeline(this);
         vegetationStreamingController ??= new VegetationStreamingController(this);
@@ -430,6 +442,7 @@ public sealed partial class TileLoader : MonoBehaviour
         terrainPhaseLoadInProgress = false;
         cachedTerrainSampler = null;
         activeRuntimeRequestedTileCoordinate = null;
+        runtimeVegetationTileStatusByCoordinate.Clear();
         runtimeFrameBudgetCoordinator?.Reset();
         playerCentricSurfaceController?.ResetState();
     }
@@ -2207,8 +2220,47 @@ public sealed partial class TileLoader : MonoBehaviour
         nextConiferOptimizationTime = 0f;
         ClearPlayerCentricSurfaceCaches();
         lastCompletedGenerationPipelineId = 0;
+        runtimeVegetationTileStatusByCoordinate.Clear();
         TerrainScene.ClearGeneratedTerrains();
         activeLoadedUnityTileCoordinate = null;
+    }
+
+    private void MarkRuntimeVegetationTileStatus(
+        Vector2Int tileCoordinate,
+        VegetationTileStreamingStatus status,
+        bool preserveSettled)
+    {
+        if (preserveSettled &&
+            runtimeVegetationTileStatusByCoordinate.TryGetValue(tileCoordinate, out VegetationTileStreamingStatus existingStatus) &&
+            existingStatus == VegetationTileStreamingStatus.Settled)
+        {
+            return;
+        }
+
+        runtimeVegetationTileStatusByCoordinate[tileCoordinate] = status;
+    }
+
+    private void SyncRuntimeVegetationTileStatuses(IEnumerable<Vector2Int> activeTileCoordinates, bool preserveExistingStatuses)
+    {
+        var activeCoordinates = new HashSet<Vector2Int>(activeTileCoordinates);
+        foreach (Vector2Int tileCoordinate in new List<Vector2Int>(runtimeVegetationTileStatusByCoordinate.Keys))
+        {
+            if (!activeCoordinates.Contains(tileCoordinate))
+            {
+                runtimeVegetationTileStatusByCoordinate.Remove(tileCoordinate);
+            }
+        }
+
+        foreach (Vector2Int tileCoordinate in activeCoordinates)
+        {
+            if (preserveExistingStatuses &&
+                runtimeVegetationTileStatusByCoordinate.ContainsKey(tileCoordinate))
+            {
+                continue;
+            }
+
+            runtimeVegetationTileStatusByCoordinate[tileCoordinate] = VegetationTileStreamingStatus.Pending;
+        }
     }
 
     private string GetTerrainObjectName(int offsetX, int offsetY, int unityTileX, int unityTileY)

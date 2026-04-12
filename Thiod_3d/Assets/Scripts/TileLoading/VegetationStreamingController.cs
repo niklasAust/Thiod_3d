@@ -188,6 +188,10 @@ internal sealed class VegetationStreamingController
                 {
                     batchState.VegetationClearOnlyTerrains.Add(terrain);
                 }
+                else
+                {
+                    owner.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
+                }
 
                 continue;
             }
@@ -318,6 +322,11 @@ internal sealed class VegetationStreamingController
             {
                 owner.RetireGeneratedContainerInternal(vegetationContainer);
             }
+
+            if (owner.TryGetUnityTileCoordinateForWorldPositionInternal(terrain.transform.position, out Vector3Int tileCoordinate))
+            {
+                owner.MarkRuntimeVegetationTileSettledInternal(new Vector2Int(tileCoordinate.x, tileCoordinate.y));
+            }
         }
     }
 
@@ -447,6 +456,7 @@ internal sealed class VegetationStreamingController
                 renderer?.LastPrototypeInitializationMilliseconds ?? 0d);
             if (completedWorkItemCount >= completedTileStats.QueuedWorkItemCount)
             {
+                owner.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
                 owner.TryLogSettledVegetationTileInternal(tileCoordinate, completedTileStats);
             }
         }

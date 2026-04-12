@@ -151,6 +151,11 @@ internal sealed class DynamicTileScheduler
         return false;
     }
 
+    public Transform? GetDynamicLoadTarget(TileLoader owner)
+    {
+        return ResolveDynamicLoadTarget(owner);
+    }
+
     public Vector3Int ResolveCurrentDesiredDynamicNeighborhoodCenter(TileLoader owner, Vector3Int fallbackTileCoordinate)
     {
         if (queuedDynamicUnityTileCoordinate.HasValue)
