@@ -13,6 +13,27 @@ internal sealed class TerrainStreamingPipeline
 {
     private readonly TileLoader owner;
 
+    private sealed class PendingTerrainCreationState
+    {
+        public GeneratedTerrainRequest Request { get; set; }
+        public Vector2Int TileCoordinate { get; set; }
+        public GTerrainData? TerrainData { get; set; }
+        public Color[]? HeightPixels { get; set; }
+        public bool HeightmapApplied { get; set; }
+    }
+
+    private readonly struct PendingTerrainSeamWorkItem
+    {
+        public PendingTerrainSeamWorkItem(GStylizedTerrain terrain, TileLoaderTerrainSeamMask seamMask)
+        {
+            Terrain = terrain;
+            SeamMask = seamMask;
+        }
+
+        public GStylizedTerrain Terrain { get; }
+        public TileLoaderTerrainSeamMask SeamMask { get; }
+    }
+
     public TerrainStreamingPipeline(TileLoader owner)
     {
         this.owner = owner;
@@ -113,9 +134,6 @@ internal sealed class TerrainStreamingPipeline
             owner.MeasureTerrainSeamsPhaseInternal(batchState, () => owner.RebuildTerrainSeamsInternal(batchState.ActiveTerrains));
             owner.MeasureTerrainShadingPhaseInternal(batchState, () => owner.ApplyTerrainShadingInternal(owner.GetTerrainsForStreamingShadingInternal(batchState)));
 
-            owner.PromoteGeneratedTerrainBatchInternal(batchState);
-            pendingBatchRoot = null;
-            owner.LogGenerationBatchSummaryInternal(batchState, "blocking");
             awaitingDeferredPhaseCompletion = true;
             owner.ScheduleDeferredGenerationPhasesInternal(batchState);
         }
@@ -247,9 +265,6 @@ internal sealed class TerrainStreamingPipeline
             }
 
             owner.PrepareDeferredGenerationTargetsInternal(batchState);
-            owner.PromoteGeneratedTerrainBatchInternal(batchState);
-            owner.LogGenerationBatchSummaryInternal(batchState, "terrain-ready");
-
             yield return RebuildTerrainSeamsOverMultipleFrames(batchState);
             if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
             {
@@ -283,48 +298,111 @@ internal sealed class TerrainStreamingPipeline
     {
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
-        float frameBudgetMilliseconds = Math.Max(0.25f, owner.TerrainCreationBudgetMsPerFrameInternal);
+        owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        float frameBudgetMilliseconds = owner.ResolveRuntimePhaseBudgetMsInternal(owner.TerrainCreationBudgetMsPerFrameInternal);
         int terrainGroupId = owner.GetGeneratedTerrainGroupIdInternal();
         List<GeneratedTerrainRequest> prioritizedRequests = owner.GetTerrainCreationRequestsInPriorityOrderInternal(batchState);
+        PendingTerrainCreationState? pending = null;
 
-        for (int i = 0; i < prioritizedRequests.Count; i++)
+        int requestIndex = 0;
+        while (requestIndex < prioritizedRequests.Count || pending != null)
         {
             if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
             {
                 yield break;
             }
 
-            GeneratedTerrainRequest request = prioritizedRequests[i];
-            Vector2Int tileCoordinate = owner.GetTileCoordinateInternal(request);
-            if (batchState.TerrainByCoordinate.ContainsKey(tileCoordinate))
+            if (pending == null)
             {
+                GeneratedTerrainRequest request = prioritizedRequests[requestIndex];
+                Vector2Int tileCoordinate = owner.GetTileCoordinateInternal(request);
+                requestIndex++;
+                if (batchState.TerrainByCoordinate.ContainsKey(tileCoordinate))
+                {
+                    continue;
+                }
+
+                pending = new PendingTerrainCreationState
+                {
+                    Request = request,
+                    TileCoordinate = tileCoordinate,
+                };
+            }
+
+            if (pending.TerrainData == null)
+            {
+                pending.TerrainData = owner.CreateTerrainDataForRuntimeCreationInternal(
+                    pending.Request.Layers,
+                    batchState.NormalizationMinHeight,
+                    batchState.NormalizationMaxHeight,
+                    pending.Request.LocalMaxHeight,
+                    pending.Request.TileHilliness);
+                if (owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, frameBudgetMilliseconds))
+                {
+                    owner.CommitRuntimeChunk(frameStopwatch);
+                    yield return null;
+                    owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+                }
                 continue;
             }
 
-            GStylizedTerrain terrain = owner.CreateTerrainInternal(
-                request.Layers,
-                request.TerrainObjectName,
-                request.LocalPosition,
-                request.UnityTileX,
-                request.UnityTileY,
+            if (pending.HeightPixels == null)
+            {
+                pending.HeightPixels = owner.BuildTerrainHeightPixelsForRuntimeCreationInternal(
+                    pending.Request.Layers.Heightmap,
+                    batchState.NormalizationMinHeight,
+                    batchState.NormalizationMaxHeight);
+                if (owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, frameBudgetMilliseconds))
+                {
+                    owner.CommitRuntimeChunk(frameStopwatch);
+                    yield return null;
+                    owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+                }
+                continue;
+            }
+
+            if (!pending.HeightmapApplied)
+            {
+                owner.UploadTerrainHeightPixelsForRuntimeCreationInternal(
+                    pending.TerrainData,
+                    pending.HeightPixels);
+                pending.HeightmapApplied = true;
+                if (owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, frameBudgetMilliseconds))
+                {
+                    owner.CommitRuntimeChunk(frameStopwatch);
+                    yield return null;
+                    owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+                }
+                continue;
+            }
+
+            GStylizedTerrain terrain = owner.FinalizeRuntimeCreatedTerrainInternal(
+                pending.Request.Layers,
+                pending.TerrainData,
+                pending.Request.TerrainObjectName,
+                pending.Request.LocalPosition,
+                pending.Request.UnityTileX,
+                pending.Request.UnityTileY,
                 batchState.NormalizationMinHeight,
                 batchState.NormalizationMaxHeight,
-                request.LocalMinHeight,
-                request.LocalMaxHeight,
-                request.TileHilliness,
+                pending.Request.LocalMinHeight,
+                pending.Request.LocalMaxHeight,
+                pending.Request.TileHilliness,
                 terrainGroupId,
                 batchState.BatchRoot!);
             batchState.CreatedTerrains.Add(terrain);
-            batchState.CreatedRequests.Add(request);
-            batchState.TerrainByCoordinate[tileCoordinate] = terrain;
+            batchState.CreatedRequests.Add(pending.Request);
+            batchState.TerrainByCoordinate[pending.TileCoordinate] = terrain;
+            pending = null;
 
-            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, frameBudgetMilliseconds))
             {
                 continue;
             }
 
-            frameStopwatch.Restart();
+            owner.CommitRuntimeChunk(frameStopwatch);
             yield return null;
+            owner.RestartRuntimeChunkStopwatch(frameStopwatch);
         }
 
         totalStopwatch.Stop();
@@ -336,32 +414,41 @@ internal sealed class TerrainStreamingPipeline
     {
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
-        float frameBudgetMilliseconds = Math.Max(0.25f, owner.TerrainSeamBudgetMsPerFrameInternal);
-        var terrainChunk = new List<GStylizedTerrain>(1);
+        owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        float frameBudgetMilliseconds = owner.ResolveRuntimePhaseBudgetMsInternal(owner.TerrainSeamBudgetMsPerFrameInternal);
+        List<PendingTerrainSeamWorkItem> seamWorkItems = BuildTerrainSeamWorkItems(batchState);
+        if (seamWorkItems.Count == 0)
+        {
+            totalStopwatch.Stop();
+            owner.RecordGenerationPhaseTimingInternal(batchState, "terrain seams", totalStopwatch.Elapsed);
+            owner.LogGenerationPhaseTimingInternal("terrain seams", totalStopwatch.Elapsed);
+            yield break;
+        }
 
-        for (int i = 0; i < batchState.ActiveTerrains.Count; i++)
+        owner.ConnectAdjacentTerrainsInternal();
+
+        for (int i = 0; i < seamWorkItems.Count; i++)
         {
             if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
             {
                 yield break;
             }
 
-            GStylizedTerrain terrain = batchState.ActiveTerrains[i];
-            if (terrain == null || terrain.TerrainData == null)
+            PendingTerrainSeamWorkItem seamWorkItem = seamWorkItems[i];
+            if (seamWorkItem.Terrain == null || seamWorkItem.Terrain.TerrainData == null)
             {
                 continue;
             }
 
-            terrainChunk.Clear();
-            terrainChunk.Add(terrain);
-            owner.RebuildTerrainSeamsInternal(terrainChunk);
-            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            owner.RebuildTerrainSeamsInternal(seamWorkItem.Terrain, seamWorkItem.SeamMask);
+            if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, frameBudgetMilliseconds))
             {
                 continue;
             }
 
-            frameStopwatch.Restart();
+            owner.CommitRuntimeChunk(frameStopwatch);
             yield return null;
+            owner.RestartRuntimeChunkStopwatch(frameStopwatch);
         }
 
         totalStopwatch.Stop();
@@ -369,11 +456,53 @@ internal sealed class TerrainStreamingPipeline
         owner.LogGenerationPhaseTimingInternal("terrain seams", totalStopwatch.Elapsed);
     }
 
+    private List<PendingTerrainSeamWorkItem> BuildTerrainSeamWorkItems(GeneratedTerrainBatchState batchState)
+    {
+        var seamMasksByCoordinate = new Dictionary<Vector2Int, TileLoaderTerrainSeamMask>();
+        for (int i = 0; i < batchState.CreatedRequests.Count; i++)
+        {
+            Vector2Int tileCoordinate = owner.GetTileCoordinateInternal(batchState.CreatedRequests[i]);
+            AddSeamMask(seamMasksByCoordinate, tileCoordinate, TileLoaderTerrainSeamMask.All);
+            AddSeamMask(seamMasksByCoordinate, tileCoordinate + Vector2Int.left, TileLoaderTerrainSeamMask.Right);
+            AddSeamMask(seamMasksByCoordinate, tileCoordinate + Vector2Int.right, TileLoaderTerrainSeamMask.Left);
+            AddSeamMask(seamMasksByCoordinate, tileCoordinate + Vector2Int.up, TileLoaderTerrainSeamMask.Bottom);
+            AddSeamMask(seamMasksByCoordinate, tileCoordinate + Vector2Int.down, TileLoaderTerrainSeamMask.Top);
+        }
+
+        var seamWorkItems = new List<PendingTerrainSeamWorkItem>(seamMasksByCoordinate.Count);
+        foreach (KeyValuePair<Vector2Int, TileLoaderTerrainSeamMask> entry in seamMasksByCoordinate)
+        {
+            if (!batchState.TerrainByCoordinate.TryGetValue(entry.Key, out GStylizedTerrain terrain) || terrain == null)
+            {
+                continue;
+            }
+
+            seamWorkItems.Add(new PendingTerrainSeamWorkItem(terrain, entry.Value));
+        }
+
+        return seamWorkItems;
+    }
+
+    private static void AddSeamMask(
+        IDictionary<Vector2Int, TileLoaderTerrainSeamMask> seamMasksByCoordinate,
+        Vector2Int tileCoordinate,
+        TileLoaderTerrainSeamMask seamMask)
+    {
+        if (!seamMasksByCoordinate.TryGetValue(tileCoordinate, out TileLoaderTerrainSeamMask existingMask))
+        {
+            seamMasksByCoordinate[tileCoordinate] = seamMask;
+            return;
+        }
+
+        seamMasksByCoordinate[tileCoordinate] = existingMask | seamMask;
+    }
+
     private IEnumerator ApplyTerrainShadingOverMultipleFrames(GeneratedTerrainBatchState batchState)
     {
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
-        float frameBudgetMilliseconds = Math.Max(0.25f, owner.TerrainShadingBudgetMsPerFrameInternal);
+        owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        float frameBudgetMilliseconds = owner.ResolveRuntimePhaseBudgetMsInternal(owner.TerrainShadingBudgetMsPerFrameInternal);
         var terrainChunk = new List<GStylizedTerrain>(1);
         IReadOnlyList<GStylizedTerrain> shadingTerrains = owner.GetTerrainsForStreamingShadingInternal(batchState);
 
@@ -393,13 +522,14 @@ internal sealed class TerrainStreamingPipeline
             terrainChunk.Clear();
             terrainChunk.Add(terrain);
             owner.ApplyTerrainShadingInternal(terrainChunk);
-            if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+            if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, frameBudgetMilliseconds))
             {
                 continue;
             }
 
-            frameStopwatch.Restart();
+            owner.CommitRuntimeChunk(frameStopwatch);
             yield return null;
+            owner.RestartRuntimeChunkStopwatch(frameStopwatch);
         }
 
         totalStopwatch.Stop();

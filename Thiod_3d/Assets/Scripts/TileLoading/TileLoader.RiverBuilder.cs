@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using Unity.Mathematics;
 using UnityEngine;
+using Unity.Profiling;
 using UnityEngine.Rendering;
 using UnityEngine.Splines;
 using Pinwheel.Griffin;
@@ -43,6 +44,8 @@ internal sealed class TileLoaderRiverSettings
 
 internal sealed class TileLoaderRiverBuilder
 {
+    private static readonly ProfilerMarker RiverPathMeshMarker = new("TileLoader.RiverWater.BuildPathMesh");
+    private static readonly ProfilerMarker RiverCombinedMeshMarker = new("TileLoader.RiverWater.CombineMeshes");
     private readonly TileLoaderRiverSettings settings;
     private readonly TileLoaderTerrainSampler terrainSampler;
     private readonly string defaultRiverWaterMaterialAssetPath;
@@ -70,66 +73,154 @@ internal sealed class TileLoaderRiverBuilder
             return;
         }
 
-        Material? waterMaterial = null;
         var riverWaterSeams = new Dictionary<string, RiverWaterSeamCrossSection>(StringComparer.Ordinal);
         int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
         for (int i = 0; i < terrainCount; i++)
         {
-            GeneratedTerrainRequest request = terrainRequests[i];
-            IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
-            if (riverPaths.Count == 0)
-            {
-                continue;
-            }
-
-            waterMaterial ??= ResolveRiverWaterMaterial();
-            if (waterMaterial == null)
-            {
-                Debug.LogWarning(
-                    $"TileLoader could not resolve the Stylized Water river material at '{GetRiverWaterMaterialAssetPath()}'. Generated river meshes were skipped.",
-                    owner);
-                return;
-            }
-
-            GStylizedTerrain terrain = terrains[i];
-            if (terrain == null)
-            {
-                continue;
-            }
-
-            Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
-            Mesh? riverMesh = BuildRiverWaterMesh(
-                terrain,
-                request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
-                request,
-                riverPaths,
-                request.Layers.RiverInfo,
-                riverWaterSeams,
-                request.Layers.RiverUsesProfile,
-                riverSplineCache,
+            PopulateRiverWaterForTerrain(
+                terrainRequests[i],
+                terrains[i],
                 normalizationMinHeight,
-                normalizationMaxHeight);
-            if (riverMesh == null)
-            {
-                continue;
-            }
-
-            var riverObject = new GameObject("RiverWater");
-            riverObject.transform.SetParent(riverContainer, false);
-            riverObject.transform.localPosition = Vector3.zero;
-            riverObject.transform.localRotation = Quaternion.identity;
-            riverObject.transform.localScale = Vector3.one;
-            ApplyRiverWaterLayer(riverObject);
-
-            MeshFilter meshFilter = riverObject.AddComponent<MeshFilter>();
-            meshFilter.sharedMesh = riverMesh;
-
-            MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
-            meshRenderer.sharedMaterial = waterMaterial;
-            ApplyRiverWaterMaterialOverrides(meshRenderer, waterMaterial);
-            meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
-            meshRenderer.receiveShadows = false;
+                normalizationMaxHeight,
+                riverSplineCache,
+                riverWaterSeams,
+                owner);
         }
+    }
+
+    public bool PopulateRiverWaterForTerrain(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain? terrain,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
+        UnityEngine.Object owner)
+    {
+        IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
+        if (riverPaths.Count == 0 || terrain == null)
+        {
+            return false;
+        }
+
+        Material? waterMaterial = ResolveRiverWaterMaterial();
+        if (waterMaterial == null)
+        {
+            Debug.LogWarning(
+                $"TileLoader could not resolve the Stylized Water river material at '{GetRiverWaterMaterialAssetPath()}'. Generated river meshes were skipped.",
+                owner);
+            return false;
+        }
+
+        Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
+        Mesh? riverMesh = BuildRiverWaterMesh(
+            terrain,
+            request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
+            request,
+            riverPaths,
+            request.Layers.RiverInfo,
+            riverWaterSeams,
+            request.Layers.RiverUsesProfile,
+            riverSplineCache,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        if (riverMesh == null)
+        {
+            return false;
+        }
+
+        var riverObject = new GameObject("RiverWater");
+        riverObject.transform.SetParent(riverContainer, false);
+        riverObject.transform.localPosition = Vector3.zero;
+        riverObject.transform.localRotation = Quaternion.identity;
+        riverObject.transform.localScale = Vector3.one;
+        ApplyRiverWaterLayer(riverObject);
+
+        MeshFilter meshFilter = riverObject.AddComponent<MeshFilter>();
+        meshFilter.sharedMesh = riverMesh;
+
+        MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
+        meshRenderer.sharedMaterial = waterMaterial;
+        ApplyRiverWaterMaterialOverrides(meshRenderer, waterMaterial);
+        meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+        meshRenderer.receiveShadows = false;
+        return true;
+    }
+
+    public int GetRiverWaterPathCount(GeneratedTerrainRequest request, GStylizedTerrain? terrain)
+    {
+        if (!settings.CreateRiverWater || terrain == null)
+        {
+            return 0;
+        }
+
+        return request.Layers.RiverSurfacePaths.Count;
+    }
+
+    public bool PopulateRiverWaterForPath(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain? terrain,
+        int riverPathIndex,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams,
+        UnityEngine.Object owner)
+    {
+        if (!settings.CreateRiverWater || terrain == null)
+        {
+            return false;
+        }
+
+        IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
+        if ((uint)riverPathIndex >= (uint)riverPaths.Count)
+        {
+            return false;
+        }
+
+        Material? waterMaterial = ResolveRiverWaterMaterial();
+        if (waterMaterial == null)
+        {
+            Debug.LogWarning(
+                $"TileLoader could not resolve the Stylized Water river material at '{GetRiverWaterMaterialAssetPath()}'. Generated river meshes were skipped.",
+                owner);
+            return false;
+        }
+
+        Mesh? riverMesh = BuildRiverWaterMesh(
+            terrain,
+            request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
+            request,
+            riverPaths[riverPathIndex],
+            riverPathIndex,
+            request.Layers.RiverInfo,
+            riverWaterSeams,
+            request.Layers.RiverUsesProfile,
+            riverSplineCache,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        if (riverMesh == null)
+        {
+            return false;
+        }
+
+        Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
+        var riverObject = new GameObject($"RiverWater_{riverPathIndex.ToString(CultureInfo.InvariantCulture)}");
+        riverObject.transform.SetParent(riverContainer, false);
+        riverObject.transform.localPosition = Vector3.zero;
+        riverObject.transform.localRotation = Quaternion.identity;
+        riverObject.transform.localScale = Vector3.one;
+        ApplyRiverWaterLayer(riverObject);
+
+        MeshFilter meshFilter = riverObject.AddComponent<MeshFilter>();
+        meshFilter.sharedMesh = riverMesh;
+
+        MeshRenderer meshRenderer = riverObject.AddComponent<MeshRenderer>();
+        meshRenderer.sharedMaterial = waterMaterial;
+        ApplyRiverWaterMaterialOverrides(meshRenderer, waterMaterial);
+        meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+        meshRenderer.receiveShadows = false;
+        return true;
     }
 
     public void PopulateRiverDebugSplines(
@@ -147,32 +238,41 @@ internal sealed class TileLoaderRiverBuilder
         int terrainCount = Math.Min(terrainRequests.Count, terrains.Count);
         for (int i = 0; i < terrainCount; i++)
         {
-            GeneratedTerrainRequest request = terrainRequests[i];
-            IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
-            if (riverPaths.Count == 0)
-            {
-                continue;
-            }
-
-            GStylizedTerrain terrain = terrains[i];
-            if (terrain == null)
-            {
-                continue;
-            }
-
-            Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
-            SplineContainer splineContainer = CreateRiverDebugSplineContainer(riverContainer);
-            IReadOnlyList<Spline> splines = BuildRiverDebugSplines(
-                terrain,
-                request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
-                request,
-                riverPaths,
-                riverSplineCache,
+            PopulateRiverDebugSplinesForTerrain(
+                terrainRequests[i],
+                terrains[i],
                 normalizationMinHeight,
-                normalizationMaxHeight);
-            splineContainer.Splines = splines;
-            splineContainer.gameObject.SetActive(splines.Count > 0);
+                normalizationMaxHeight,
+                riverSplineCache);
         }
+    }
+
+    public bool PopulateRiverDebugSplinesForTerrain(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain? terrain,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache)
+    {
+        IReadOnlyList<RiverSurfacePath> riverPaths = request.Layers.RiverSurfacePaths;
+        if (riverPaths.Count == 0 || terrain == null)
+        {
+            return false;
+        }
+
+        Transform riverContainer = CreateRiverWaterContainer(terrain.transform);
+        SplineContainer splineContainer = CreateRiverDebugSplineContainer(riverContainer);
+        IReadOnlyList<Spline> splines = BuildRiverDebugSplines(
+            terrain,
+            request.Layers.RiverSurfaceHeightmap ?? request.Layers.Heightmap,
+            request,
+            riverPaths,
+            riverSplineCache,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        splineContainer.Splines = splines;
+        splineContainer.gameObject.SetActive(splines.Count > 0);
+        return splines.Count > 0;
     }
 
     private void ApplyRiverWaterMaterialOverrides(MeshRenderer meshRenderer, Material waterMaterial)
@@ -262,20 +362,23 @@ internal sealed class TileLoaderRiverBuilder
             return combineInstances[0].mesh;
         }
 
-        var combinedMesh = new Mesh
+        using (RiverCombinedMeshMarker.Auto())
         {
-            name = "Generated River Water Mesh"
-        };
-        if (vertexCount > ushort.MaxValue)
-        {
-            combinedMesh.indexFormat = IndexFormat.UInt32;
-        }
+            var combinedMesh = new Mesh
+            {
+                name = "Generated River Water Mesh"
+            };
+            if (vertexCount > ushort.MaxValue)
+            {
+                combinedMesh.indexFormat = IndexFormat.UInt32;
+            }
 
-        combinedMesh.CombineMeshes(combineInstances.ToArray(), true, false, false);
-        combinedMesh.RecalculateBounds();
-        combinedMesh.RecalculateNormals();
-        combinedMesh.RecalculateTangents();
-        return combinedMesh;
+            combinedMesh.CombineMeshes(combineInstances.ToArray(), true, false, false);
+            combinedMesh.RecalculateBounds();
+            combinedMesh.RecalculateNormals();
+            combinedMesh.RecalculateTangents();
+            return combinedMesh;
+        }
     }
 
     private Mesh? BuildRiverWaterMesh(
@@ -291,6 +394,8 @@ internal sealed class TileLoaderRiverBuilder
         double normalizationMinHeight,
         double normalizationMaxHeight)
     {
+        using (RiverPathMeshMarker.Auto())
+        {
         IReadOnlyList<RiverSurfacePoint> pathPoints = riverPath.Points;
         if (pathPoints.Count < 2 || riverPath.HalfWidthPixels <= 0.0)
         {
@@ -627,6 +732,7 @@ internal sealed class TileLoaderRiverBuilder
             }
 
             return default;
+        }
         }
     }
 

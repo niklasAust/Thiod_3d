@@ -172,6 +172,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     [Header("Runtime Load Smoothing")]
     [SerializeField, Min(1)] private int worldgenWorkerCount = 4;
+    [SerializeField, Min(0.25f)] private float runtimeGlobalBudgetMsPerFrame = 12f;
     [SerializeField, Min(0.25f)] private float terrainCreationBudgetMsPerFrame = 6f;
     [SerializeField, Min(0.25f)] private float terrainSeamBudgetMsPerFrame = 4f;
     [SerializeField, Min(0.25f)] private float terrainShadingBudgetMsPerFrame = 4f;
@@ -252,6 +253,10 @@ public sealed partial class TileLoader : MonoBehaviour
     private VegetationStreamingController? vegetationStreamingController;
     private PlayerCentricSurfaceController? playerCentricSurfaceController;
     private GenerationReporter? generationReporter;
+    private TileLoaderFrameBudgetCoordinator? runtimeFrameBudgetCoordinator;
+    private readonly List<TileLoaderInstancedVegetationRenderer> scheduledInteractiveVegetationRenderers = new();
+    private readonly HashSet<TileLoaderInstancedVegetationRenderer> scheduledInteractiveVegetationRendererSet = new();
+    private int nextScheduledInteractiveVegetationRendererIndex;
     private int lastCompletedGenerationPipelineId;
     private bool terrainPhaseLoadInProgress;
     private Coroutine? activeTerrainLoadCoroutine;
@@ -266,6 +271,12 @@ public sealed partial class TileLoader : MonoBehaviour
     private static readonly ProfilerMarker TerrainShadingMarker = new("TileLoader.TerrainShading");
     private static readonly ProfilerMarker RiverWaterMarker = new("TileLoader.RiverWater");
     private static readonly ProfilerMarker RiverSplineMarker = new("TileLoader.RiverDebugSplines");
+    private static readonly ProfilerMarker TerrainCreateDataMarker = new("TileLoader.TerrainCreation.CreateData");
+    private static readonly ProfilerMarker TerrainCreateHeightPixelsMarker = new("TileLoader.TerrainCreation.BuildHeightPixels");
+    private static readonly ProfilerMarker TerrainUploadHeightmapMarker = new("TileLoader.TerrainCreation.UploadHeightmap");
+    private static readonly ProfilerMarker TerrainInstantiateMarker = new("TileLoader.TerrainCreation.InstantiateTerrain");
+    private static readonly ProfilerMarker TerrainConnectAdjacentMarker = new("TileLoader.TerrainSeams.ConnectAdjacentTiles");
+    private static readonly ProfilerMarker VegetationInteractionSchedulerMarker = new("TileLoader.VegetationInteractionScheduler");
 
     private TerrainSceneFacade TerrainScene => terrainSceneFacade ??= new TerrainSceneFacade(this);
     private Transform? activeGeneratedTerrainRoot
@@ -349,6 +360,7 @@ public sealed partial class TileLoader : MonoBehaviour
     internal float TerrainCreationBudgetMsPerFrameInternal => terrainCreationBudgetMsPerFrame;
     internal float TerrainSeamBudgetMsPerFrameInternal => terrainSeamBudgetMsPerFrame;
     internal float TerrainShadingBudgetMsPerFrameInternal => terrainShadingBudgetMsPerFrame;
+    internal float RuntimeGlobalBudgetMsPerFrameInternal => runtimeGlobalBudgetMsPerFrame;
     internal int LastCompletedGenerationPipelineIdInternal
     {
         get => lastCompletedGenerationPipelineId;
@@ -396,6 +408,7 @@ public sealed partial class TileLoader : MonoBehaviour
     internal VegetationStreamingController VegetationController => vegetationStreamingController ??= new VegetationStreamingController(this);
     internal PlayerCentricSurfaceController SurfaceController => playerCentricSurfaceController ??= new PlayerCentricSurfaceController(this);
     internal GenerationReporter Reporter => generationReporter ??= new GenerationReporter(this);
+    internal TileLoaderFrameBudgetCoordinator RuntimeFrameBudgetCoordinator => runtimeFrameBudgetCoordinator ??= new TileLoaderFrameBudgetCoordinator();
 
     internal void ResetRuntimeLifecycleState()
     {
@@ -407,6 +420,8 @@ public sealed partial class TileLoader : MonoBehaviour
         vegetationStreamingController ??= new VegetationStreamingController(this);
         playerCentricSurfaceController ??= new PlayerCentricSurfaceController(this);
         generationReporter ??= new GenerationReporter(this);
+        runtimeFrameBudgetCoordinator ??= new TileLoaderFrameBudgetCoordinator();
+        runtimeFrameBudgetCoordinator.Reset();
         playerCentricSurfaceController.ResetState();
     }
 
@@ -415,6 +430,7 @@ public sealed partial class TileLoader : MonoBehaviour
         terrainPhaseLoadInProgress = false;
         cachedTerrainSampler = null;
         activeRuntimeRequestedTileCoordinate = null;
+        runtimeFrameBudgetCoordinator?.Reset();
         playerCentricSurfaceController?.ResetState();
     }
 
@@ -448,6 +464,18 @@ public sealed partial class TileLoader : MonoBehaviour
             StopCoroutine(routine);
         }
     }
+    internal bool ShouldYieldAfterRuntimeChunk(Stopwatch chunkStopwatch, float localBudgetMilliseconds, double minimumBudgetMilliseconds = 0.25d)
+        => RuntimeFrameBudgetCoordinator.ShouldYield(runtimeGlobalBudgetMsPerFrame, localBudgetMilliseconds, chunkStopwatch, minimumBudgetMilliseconds);
+    internal void CommitRuntimeChunk(Stopwatch chunkStopwatch) => RuntimeFrameBudgetCoordinator.Commit(chunkStopwatch);
+    internal void RestartRuntimeChunkStopwatch(Stopwatch chunkStopwatch) => RuntimeFrameBudgetCoordinator.RestartChunk(chunkStopwatch);
+    internal float ResolveRuntimePhaseBudgetMsInternal(float localBudgetMilliseconds)
+        => ResolveRuntimePhaseBudgetMs(localBudgetMilliseconds);
+    internal void RegisterInstancedVegetationRendererInternal(TileLoaderInstancedVegetationRenderer renderer)
+        => RegisterInstancedVegetationRenderer(renderer);
+    internal void UnregisterInstancedVegetationRendererInternal(TileLoaderInstancedVegetationRenderer renderer)
+        => UnregisterInstancedVegetationRenderer(renderer);
+    internal void UpdateScheduledInstancedVegetationInteractionsInternal()
+        => UpdateScheduledInstancedVegetationInteractions();
     internal int BeginTerrainGenerationPipelineInternal() => ++activeGenerationPipelineId;
     internal void ResetGeneratedRuntimeArtifactsInternal()
     {
@@ -525,6 +553,68 @@ public sealed partial class TileLoader : MonoBehaviour
             tileHilliness,
             terrainGroupId,
             parent);
+    internal GTerrainData CreateTerrainDataForRuntimeCreationInternal(
+        TileLayers layers,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        double localMaxHeight,
+        double tileHilliness)
+        => CreateTerrainDataForRuntimeCreation(
+            layers,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            localMaxHeight,
+            tileHilliness);
+    internal Color[] BuildTerrainHeightPixelsForRuntimeCreationInternal(
+        double[,] heightmap,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+        => BuildTerrainHeightPixelsForRuntimeCreation(heightmap, normalizationMinHeight, normalizationMaxHeight);
+    internal void UploadTerrainHeightPixelsForRuntimeCreationInternal(
+        GTerrainData terrainData,
+        Color[] heightPixels)
+        => UploadTerrainHeightPixelsForRuntimeCreation(terrainData, heightPixels);
+    internal void ApplyTerrainHeightmapForRuntimeCreationInternal(
+        GTerrainData terrainData,
+        double[,] heightmap,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+        => ApplyTerrainHeightmapForRuntimeCreation(
+            terrainData,
+            heightmap,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+    internal GStylizedTerrain FinalizeRuntimeCreatedTerrainInternal(
+        TileLayers layers,
+        GTerrainData terrainData,
+        string terrainObjectName,
+        Vector3 localPosition,
+        int unityTileX,
+        int unityTileY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        double localMinHeight,
+        double localMaxHeight,
+        double tileHilliness,
+        int terrainGroupId,
+        Transform parent)
+        => FinalizeRuntimeCreatedTerrain(
+            layers,
+            terrainData,
+            terrainObjectName,
+            localPosition,
+            unityTileX,
+            unityTileY,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            localMinHeight,
+            localMaxHeight,
+            tileHilliness,
+            terrainGroupId,
+            parent);
+    internal void ConnectAdjacentTerrainsInternal() => ConnectAdjacentTerrains();
+    internal void RebuildTerrainSeamsInternal(GStylizedTerrain terrain, TileLoaderTerrainSeamMask seamMask)
+        => RebuildTerrainSeams(terrain, seamMask);
     internal void RebuildTerrainSeamsInternal(IReadOnlyList<GStylizedTerrain> terrains)
         => RebuildTerrainSeams(terrains as List<GStylizedTerrain> ?? new List<GStylizedTerrain>(terrains));
     internal void ApplyTerrainShadingInternal(IReadOnlyList<GStylizedTerrain> terrains) => ApplyTerrainShading(terrains);
@@ -544,6 +634,39 @@ public sealed partial class TileLoader : MonoBehaviour
             batchState.NormalizationMinHeight,
             batchState.NormalizationMaxHeight,
             batchState.RiverSplineCache);
+    internal bool PopulateRiverWaterForTerrainInternal(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain terrain,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams)
+        => PopulateRiverWaterForTerrain(
+            request,
+            terrain,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            riverSplineCache,
+            riverWaterSeams);
+    internal int GetRiverWaterPathCountInternal(GeneratedTerrainRequest request, GStylizedTerrain terrain)
+        => UseRiverBuilder(builder => builder.GetRiverWaterPathCount(request, terrain));
+    internal bool PopulateRiverWaterForPathInternal(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain terrain,
+        int riverPathIndex,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams)
+        => UseRiverBuilder(builder => builder.PopulateRiverWaterForPath(
+            request,
+            terrain,
+            riverPathIndex,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            riverSplineCache,
+            riverWaterSeams,
+            this));
     internal void PopulateRiverDebugSplinesForBatchInternal(GeneratedTerrainBatchState batchState)
         => PopulateRiverDebugSplines(
             batchState.RiverRefreshRequests,
@@ -551,6 +674,18 @@ public sealed partial class TileLoader : MonoBehaviour
             batchState.NormalizationMinHeight,
             batchState.NormalizationMaxHeight,
             batchState.RiverSplineCache);
+    internal bool PopulateRiverDebugSplinesForTerrainInternal(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain terrain,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache)
+        => PopulateRiverDebugSplinesForTerrain(
+            request,
+            terrain,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            riverSplineCache);
     internal void PopulateVegetationImmediatelyInternal(GeneratedTerrainBatchState batchState) => PopulateVegetationImmediately(batchState);
     internal void PopulateVegetationImmediatelyViaControllerInternal(GeneratedTerrainBatchState batchState)
         => VegetationController.PopulateVegetationImmediately(batchState);
@@ -769,6 +904,113 @@ public sealed partial class TileLoader : MonoBehaviour
         GeneratedTerrainBatchState? batchState = null,
         Stopwatch? totalStopwatch = null)
         => SurfaceController.UpdateVegetation(forceImmediate, batchState, totalStopwatch);
+
+    private void RegisterInstancedVegetationRenderer(TileLoaderInstancedVegetationRenderer renderer)
+    {
+        if (renderer == null || !scheduledInteractiveVegetationRendererSet.Add(renderer))
+        {
+            return;
+        }
+
+        scheduledInteractiveVegetationRenderers.Add(renderer);
+    }
+
+    private void UnregisterInstancedVegetationRenderer(TileLoaderInstancedVegetationRenderer renderer)
+    {
+        if (renderer == null || !scheduledInteractiveVegetationRendererSet.Remove(renderer))
+        {
+            return;
+        }
+
+        int index = scheduledInteractiveVegetationRenderers.IndexOf(renderer);
+        if (index < 0)
+        {
+            return;
+        }
+
+        scheduledInteractiveVegetationRenderers.RemoveAt(index);
+        if (scheduledInteractiveVegetationRenderers.Count == 0)
+        {
+            nextScheduledInteractiveVegetationRendererIndex = 0;
+            return;
+        }
+
+        if (nextScheduledInteractiveVegetationRendererIndex > index)
+        {
+            nextScheduledInteractiveVegetationRendererIndex--;
+        }
+        else if (nextScheduledInteractiveVegetationRendererIndex >= scheduledInteractiveVegetationRenderers.Count)
+        {
+            nextScheduledInteractiveVegetationRendererIndex = 0;
+        }
+    }
+
+    private void UpdateScheduledInstancedVegetationInteractions()
+    {
+        if (!Application.isPlaying || scheduledInteractiveVegetationRenderers.Count == 0)
+        {
+            return;
+        }
+
+        Vector3? targetWorldPosition = ResolveVegetationStreamingTargetWorldPosition();
+        if (!targetWorldPosition.HasValue)
+        {
+            return;
+        }
+
+        const float interactionBudgetMilliseconds = 2f;
+        const int maxChildSnapGroupsPerFrame = 2;
+        float localBudgetMilliseconds = Math.Min(Math.Max(0.1f, runtimeGlobalBudgetMsPerFrame), interactionBudgetMilliseconds);
+        var frameStopwatch = Stopwatch.StartNew();
+        RestartRuntimeChunkStopwatch(frameStopwatch);
+        int remainingChildSnapGroups = maxChildSnapGroupsPerFrame;
+        int rendererCount = scheduledInteractiveVegetationRenderers.Count;
+        int startIndex = rendererCount > 0
+            ? nextScheduledInteractiveVegetationRendererIndex % rendererCount
+            : 0;
+        int processedRendererCount = 0;
+        bool processedAny = false;
+
+        using (VegetationInteractionSchedulerMarker.Auto())
+        {
+            while (processedRendererCount < rendererCount)
+            {
+                int rendererIndex = (startIndex + processedRendererCount) % rendererCount;
+                TileLoaderInstancedVegetationRenderer renderer = scheduledInteractiveVegetationRenderers[rendererIndex];
+                processedRendererCount++;
+                if (renderer == null || !renderer.IsScheduledInteractionActive)
+                {
+                    continue;
+                }
+
+                processedAny |= renderer.RunScheduledInteractionStep(
+                    targetWorldPosition.Value,
+                    Time.unscaledTime,
+                    ref remainingChildSnapGroups);
+                if (ShouldYieldAfterRuntimeChunk(frameStopwatch, localBudgetMilliseconds, minimumBudgetMilliseconds: 0.1d))
+                {
+                    break;
+                }
+            }
+        }
+
+        if (rendererCount > 0)
+        {
+            nextScheduledInteractiveVegetationRendererIndex = (startIndex + processedRendererCount) % rendererCount;
+        }
+
+        if (processedAny)
+        {
+            CommitRuntimeChunk(frameStopwatch);
+        }
+    }
+
+    private float ResolveRuntimePhaseBudgetMs(float localBudgetMilliseconds)
+    {
+        float clampedLocalBudget = Mathf.Max(0.25f, localBudgetMilliseconds);
+        float clampedGlobalBudget = Mathf.Max(0.25f, runtimeGlobalBudgetMsPerFrame);
+        return Mathf.Max(clampedLocalBudget, clampedGlobalBudget);
+    }
 
     private void OnValidate()
     {
@@ -1247,11 +1489,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private IReadOnlyList<GStylizedTerrain> GetTerrainsForStreamingShading(GeneratedTerrainBatchState batchState)
     {
-        if (batchState.CreatedTerrains.Count > 0)
-        {
-            return batchState.CreatedTerrains;
-        }
-
+        // Runtime-created terrains are already shaded during CreateTerrain().
         return Array.Empty<GStylizedTerrain>();
     }
 
@@ -1614,6 +1852,19 @@ public sealed partial class TileLoader : MonoBehaviour
         try
         {
             action(CreateRiverBuilder(settings));
+        }
+        finally
+        {
+            ApplyRiverSettings(settings);
+        }
+    }
+
+    private T UseRiverBuilder<T>(Func<TileLoaderRiverBuilder, T> func)
+    {
+        TileLoaderRiverSettings settings = CreateRiverSettings();
+        try
+        {
+            return func(CreateRiverBuilder(settings));
         }
         finally
         {
@@ -2376,58 +2627,146 @@ public sealed partial class TileLoader : MonoBehaviour
         int terrainGroupId,
         Transform parentRoot)
     {
-        GTexturingModel texturingModel = GetTexturingModel();
-        GTerrainData terrainData = Polaris.CreateAndInitTerrainData(texturingModel);
-        terrainData.Geometry.StorageMode = GGeometry.GStorageMode.GenerateOnEnable;
-        terrainData.Geometry.Width = terrainWidth;
-        terrainData.Geometry.Length = terrainLength;
-        terrainData.Geometry.Height = terrainHeight;
-        terrainData.Geometry.HeightMapResolution = layers.Heightmap.GetLength(0);
-        terrainData.Geometry.MeshBaseResolution = 0;
-        terrainData.Geometry.MeshResolution = 3;
-        terrainData.Geometry.ChunkGridSize = Mathf.Max(1, terrainGridSize);
-        ConfigureShading(
-            terrainData,
-            texturingModel,
-            layers.Heightmap,
+        GTerrainData terrainData = CreateTerrainDataForRuntimeCreation(
+            layers,
             normalizationMinHeight,
             normalizationMaxHeight,
             localMaxHeight,
             tileHilliness);
-
-        Texture2D heightMap = Polaris.GetHeightMap(terrainData);
-        Color[] pixels = BuildHeightPixels(layers.Heightmap, normalizationMinHeight, normalizationMaxHeight);
-        heightMap.SetPixels(pixels);
-        heightMap.Apply(false, false);
-
-        GStylizedTerrain terrain = Polaris.CreateTerrain(terrainData);
-        terrain.name = terrainObjectName;
-        terrain.GroupId = terrainGroupId;
-        terrain.AutoConnect = true;
-        terrain.transform.SetParent(parentRoot, false);
-        terrain.transform.localPosition = localPosition;
-        terrain.transform.localRotation = Quaternion.identity;
-        terrain.transform.localScale = Vector3.one;
-        SetTerrainShadingMetadata(
+        ApplyTerrainHeightmapForRuntimeCreation(
+            terrainData,
+            layers.Heightmap,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        return FinalizeRuntimeCreatedTerrain(
+            layers,
+            terrainData,
             terrainObjectName,
+            localPosition,
+            unityTileX,
+            unityTileY,
             normalizationMinHeight,
             normalizationMaxHeight,
-            TileHeightUnitsToMeters(localMaxHeight),
-            tileHilliness);
-        terrain.TerrainData.Shading.UpdateMaterials();
-        ApplyWorldAlignedSplatMaterialOffsets(terrain);
-        ApplyTerrainDecalRenderingLayer(terrain);
+            localMinHeight,
+            localMaxHeight,
+            tileHilliness,
+            terrainGroupId,
+            parentRoot);
+    }
 
-        if (logHeightStats)
+    private GTerrainData CreateTerrainDataForRuntimeCreation(
+        TileLayers layers,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        double localMaxHeight,
+        double tileHilliness)
+    {
+        using (TerrainCreateDataMarker.Auto())
         {
-            Debug.Log(
-                $"TileLoader loaded Unity tile ({unityTileX},{unityTileY},0) as worldgen tile ({layers.TileX},{layers.TileY}) from '{worldDataFile}'. " +
-                $"Tile range: {localMinHeight.ToString("F3", CultureInfo.InvariantCulture)} to {localMaxHeight.ToString("F3", CultureInfo.InvariantCulture)}. " +
-                $"Normalization range: {normalizationMinHeight.ToString("F3", CultureInfo.InvariantCulture)} to {normalizationMaxHeight.ToString("F3", CultureInfo.InvariantCulture)}.",
-                this);
+            GTexturingModel texturingModel = GetTexturingModel();
+            GTerrainData terrainData = Polaris.CreateAndInitTerrainData(texturingModel);
+            terrainData.Geometry.StorageMode = GGeometry.GStorageMode.GenerateOnEnable;
+            terrainData.Geometry.Width = terrainWidth;
+            terrainData.Geometry.Length = terrainLength;
+            terrainData.Geometry.Height = terrainHeight;
+            terrainData.Geometry.HeightMapResolution = layers.Heightmap.GetLength(0);
+            terrainData.Geometry.MeshBaseResolution = 0;
+            terrainData.Geometry.MeshResolution = 3;
+            terrainData.Geometry.ChunkGridSize = Mathf.Max(1, terrainGridSize);
+            ConfigureShading(
+                terrainData,
+                texturingModel,
+                layers.Heightmap,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                localMaxHeight,
+                tileHilliness);
+            return terrainData;
         }
+    }
 
-        return terrain;
+    private Color[] BuildTerrainHeightPixelsForRuntimeCreation(
+        double[,] heightmap,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        using (TerrainCreateHeightPixelsMarker.Auto())
+        {
+            return BuildHeightPixels(heightmap, normalizationMinHeight, normalizationMaxHeight);
+        }
+    }
+
+    private void UploadTerrainHeightPixelsForRuntimeCreation(
+        GTerrainData terrainData,
+        Color[] heightPixels)
+    {
+        using (TerrainUploadHeightmapMarker.Auto())
+        {
+            Texture2D heightMap = Polaris.GetHeightMap(terrainData);
+            heightMap.SetPixels(heightPixels);
+            heightMap.Apply(false, false);
+        }
+    }
+
+    private void ApplyTerrainHeightmapForRuntimeCreation(
+        GTerrainData terrainData,
+        double[,] heightmap,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+    {
+        Color[] heightPixels = BuildTerrainHeightPixelsForRuntimeCreation(
+            heightmap,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+        UploadTerrainHeightPixelsForRuntimeCreation(terrainData, heightPixels);
+    }
+
+    private GStylizedTerrain FinalizeRuntimeCreatedTerrain(
+        TileLayers layers,
+        GTerrainData terrainData,
+        string terrainObjectName,
+        Vector3 localPosition,
+        int unityTileX,
+        int unityTileY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        double localMinHeight,
+        double localMaxHeight,
+        double tileHilliness,
+        int terrainGroupId,
+        Transform parentRoot)
+    {
+        using (TerrainInstantiateMarker.Auto())
+        {
+            GStylizedTerrain terrain = Polaris.CreateTerrain(terrainData);
+            terrain.name = terrainObjectName;
+            terrain.GroupId = terrainGroupId;
+            terrain.AutoConnect = true;
+            terrain.transform.SetParent(parentRoot, false);
+            terrain.transform.localPosition = localPosition;
+            terrain.transform.localRotation = Quaternion.identity;
+            terrain.transform.localScale = Vector3.one;
+            SetTerrainShadingMetadata(
+                terrainObjectName,
+                normalizationMinHeight,
+                normalizationMaxHeight,
+                TileHeightUnitsToMeters(localMaxHeight),
+                tileHilliness);
+            terrain.TerrainData.Shading.UpdateMaterials();
+            ApplyWorldAlignedSplatMaterialOffsets(terrain);
+            ApplyTerrainDecalRenderingLayer(terrain);
+
+            if (logHeightStats)
+            {
+                Debug.Log(
+                    $"TileLoader loaded Unity tile ({unityTileX},{unityTileY},0) as worldgen tile ({layers.TileX},{layers.TileY}) from '{worldDataFile}'. " +
+                    $"Tile range: {localMinHeight.ToString("F3", CultureInfo.InvariantCulture)} to {localMaxHeight.ToString("F3", CultureInfo.InvariantCulture)}. " +
+                    $"Normalization range: {normalizationMinHeight.ToString("F3", CultureInfo.InvariantCulture)} to {normalizationMaxHeight.ToString("F3", CultureInfo.InvariantCulture)}.",
+                    this);
+            }
+
+            return terrain;
+        }
     }
 
     private void ConfigureShading(
@@ -2599,6 +2938,24 @@ public sealed partial class TileLoader : MonoBehaviour
         UseTerrainShadingService(service => service.RebuildTerrainSeams(terrains, this));
     }
 
+    private void ConnectAdjacentTerrains()
+    {
+        using (TerrainConnectAdjacentMarker.Auto())
+        {
+            UseTerrainShadingService(service => service.ConnectAdjacentTerrainTiles());
+        }
+    }
+
+    private void RebuildTerrainSeams(GStylizedTerrain terrain, TileLoaderTerrainSeamMask seamMask)
+    {
+        if (terrain == null)
+        {
+            return;
+        }
+
+        UseTerrainShadingService(service => service.RebuildTerrainSeams(terrain, seamMask, this));
+    }
+
     private void RebuildExistingGeneratedTerrainSeams()
     {
         var terrains = new List<GStylizedTerrain>();
@@ -2635,6 +2992,24 @@ public sealed partial class TileLoader : MonoBehaviour
             this));
     }
 
+    private bool PopulateRiverWaterForTerrain(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain terrain,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache,
+        IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams)
+    {
+        return UseRiverBuilder(builder => builder.PopulateRiverWaterForTerrain(
+            request,
+            terrain,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            riverSplineCache,
+            riverWaterSeams,
+            this));
+    }
+
     private void PopulateRiverDebugSplines(
         IReadOnlyList<GeneratedTerrainRequest> terrainRequests,
         IReadOnlyList<GStylizedTerrain> terrains,
@@ -2645,6 +3020,21 @@ public sealed partial class TileLoader : MonoBehaviour
         UseRiverBuilder(builder => builder.PopulateRiverDebugSplines(
             terrainRequests,
             terrains,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            riverSplineCache));
+    }
+
+    private bool PopulateRiverDebugSplinesForTerrain(
+        GeneratedTerrainRequest request,
+        GStylizedTerrain terrain,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        Dictionary<string, Spline> riverSplineCache)
+    {
+        return UseRiverBuilder(builder => builder.PopulateRiverDebugSplinesForTerrain(
+            request,
+            terrain,
             normalizationMinHeight,
             normalizationMaxHeight,
             riverSplineCache));
@@ -2756,6 +3146,7 @@ public sealed partial class TileLoader : MonoBehaviour
             vegetationLoadMode == VegetationLoadMode.HybridInteractive,
             vegetationInteractionRadiusMeters,
             vegetationInteractionHysteresisMeters,
+            this,
             prototypeInitBudgetMsPerFrame);
         buildState.LastFinalizedPlacementCount = buildState.Placements.Count;
         if (buildState.BatchState != null)

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections;
 using Stopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
+using Unity.Profiling;
 using UnityEngine.Rendering;
 #if GRIFFIN
 using Pinwheel.Griffin;
@@ -123,12 +124,20 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 {
     private const int MaxInstancesPerDrawCall = 1023;
     private const float MinimumInteractionUpdateInterval = 0.2f;
+    private const int MaxPendingChildSnapGroupsPerFrame = 1;
+    private const int MaxInteractionPlacementChecksPerUpdate = 128;
+    private static readonly ProfilerMarker ScheduledInteractionMarker = new("TileLoader.VegetationRenderer.ScheduledInteraction");
+    private static readonly ProfilerMarker PromotePlacementMarker = new("TileLoader.VegetationRenderer.PromotePlacement");
+    private static readonly ProfilerMarker DemotePlacementMarker = new("TileLoader.VegetationRenderer.DemotePlacement");
+    private static readonly ProfilerMarker ChildSnapMarker = new("TileLoader.VegetationRenderer.ChildSnap");
 
     private TileLoaderInstancedVegetationPrototype[] _prototypes = Array.Empty<TileLoaderInstancedVegetationPrototype>();
     private TileLoaderInstancedVegetationPlacement[] _placements = Array.Empty<TileLoaderInstancedVegetationPlacement>();
     private PrototypeRuntime[] _prototypeRuntimes = Array.Empty<PrototypeRuntime>();
     private PlacementRuntimeState[] _placementStates = Array.Empty<PlacementRuntimeState>();
     private readonly Matrix4x4[] _matrixBuffer = new Matrix4x4[MaxInstancesPerDrawCall];
+    private readonly Queue<SurfaceObjectChildSnapGroup> _pendingChildSnapGroups = new();
+    private readonly HashSet<int> _pendingChildSnapGroupIds = new();
     private float _interactionRadiusMeters;
     private float _interactionHysteresisMeters;
     private bool _interactive;
@@ -136,6 +145,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
     private Transform? _promotedContainer;
     private Coroutine? _runtimeBuildCoroutine;
     private float _prototypeInitBudgetMsPerFrame;
+    private TileLoader? _budgetOwner;
+    private int _nextInteractionPlacementIndex;
 
     public bool IsPrototypeRuntimeReady { get; private set; }
     public double LastPrototypeInitializationMilliseconds { get; private set; }
@@ -147,6 +158,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         bool interactive,
         float interactionRadiusMeters,
         float interactionHysteresisMeters,
+        TileLoader? budgetOwner,
         float prototypeInitBudgetMsPerFrame)
     {
         ReleaseRuntimeData();
@@ -168,11 +180,16 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         _interactive = interactive;
         _interactionRadiusMeters = Mathf.Max(0f, interactionRadiusMeters);
         _interactionHysteresisMeters = Mathf.Max(0f, interactionHysteresisMeters);
+        _budgetOwner = budgetOwner;
         _prototypeInitBudgetMsPerFrame = Mathf.Max(0.1f, prototypeInitBudgetMsPerFrame);
-        _nextInteractionUpdateTime = 0f;
+        _nextInteractionUpdateTime = Application.isPlaying
+            ? Time.unscaledTime + ResolveInteractionUpdateOffsetSeconds()
+            : 0f;
+        _nextInteractionPlacementIndex = 0;
         LastPrototypeInitializationMilliseconds = 0d;
         LastInitializationCpuMilliseconds = 0d;
         IsPrototypeRuntimeReady = false;
+        SyncInteractionSchedulerRegistration();
         var initializeStopwatch = Stopwatch.StartNew();
 
         if (Application.isPlaying &&
@@ -201,17 +218,34 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
     private void OnEnable()
     {
         RenderPipelineManager.beginCameraRendering += HandleBeginCameraRendering;
+        SyncInteractionSchedulerRegistration();
     }
 
     private void OnDisable()
     {
         RenderPipelineManager.beginCameraRendering -= HandleBeginCameraRendering;
+        _budgetOwner?.UnregisterInstancedVegetationRendererInternal(this);
+        _pendingChildSnapGroups.Clear();
+        _pendingChildSnapGroupIds.Clear();
         ReleasePromotedInstances();
     }
 
     private void Update()
     {
-        if (!Application.isPlaying || !_interactive || _placements.Length == 0)
+        if (!Application.isPlaying)
+        {
+            return;
+        }
+
+        if (_budgetOwner != null)
+        {
+            return;
+        }
+
+        int remainingChildSnapGroups = MaxPendingChildSnapGroupsPerFrame;
+        ProcessPendingChildSnapGroups(ref remainingChildSnapGroups);
+
+        if (!_interactive || _placements.Length == 0)
         {
             return;
         }
@@ -231,9 +265,11 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         float promoteDistanceSq = _interactionRadiusMeters * _interactionRadiusMeters;
         float demoteDistance = _interactionRadiusMeters + _interactionHysteresisMeters;
         float demoteDistanceSq = demoteDistance * demoteDistance;
+        int placementsToCheck = Mathf.Min(_placements.Length, MaxInteractionPlacementChecksPerUpdate);
 
-        for (int i = 0; i < _placements.Length; i++)
+        for (int checkedCount = 0; checkedCount < placementsToCheck; checkedCount++)
         {
+            int i = (_nextInteractionPlacementIndex + checkedCount) % _placements.Length;
             TileLoaderInstancedVegetationPlacement placement = _placements[i];
             if ((uint)placement.PrototypeIndex >= (uint)_prototypes.Length)
             {
@@ -270,6 +306,98 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             }
 
             DemotePlacement(i);
+        }
+
+        _nextInteractionPlacementIndex = (_nextInteractionPlacementIndex + placementsToCheck) % _placements.Length;
+
+        ProcessPendingChildSnapGroups(ref remainingChildSnapGroups);
+    }
+
+    internal bool IsScheduledInteractionActive =>
+        Application.isPlaying &&
+        isActiveAndEnabled &&
+        _interactive &&
+        _placements.Length > 0 &&
+        IsPrototypeRuntimeReady;
+
+    internal bool RunScheduledInteractionStep(
+        Vector3 targetWorldPosition,
+        float currentTime,
+        ref int remainingChildSnapGroups)
+    {
+        if (!IsScheduledInteractionActive)
+        {
+            return ProcessPendingChildSnapGroups(ref remainingChildSnapGroups);
+        }
+
+        if (currentTime < _nextInteractionUpdateTime)
+        {
+            return ProcessPendingChildSnapGroups(ref remainingChildSnapGroups);
+        }
+
+        using (ScheduledInteractionMarker.Auto())
+        {
+            _nextInteractionUpdateTime = currentTime + MinimumInteractionUpdateInterval;
+            bool didWork = false;
+            bool promotionOrDemotionPerformed = false;
+            float promoteDistanceSq = _interactionRadiusMeters * _interactionRadiusMeters;
+            float demoteDistance = _interactionRadiusMeters + _interactionHysteresisMeters;
+            float demoteDistanceSq = demoteDistance * demoteDistance;
+            int placementsToCheck = Mathf.Min(_placements.Length, MaxInteractionPlacementChecksPerUpdate);
+
+            for (int checkedCount = 0; checkedCount < placementsToCheck; checkedCount++)
+            {
+                int i = (_nextInteractionPlacementIndex + checkedCount) % _placements.Length;
+                TileLoaderInstancedVegetationPlacement placement = _placements[i];
+                if ((uint)placement.PrototypeIndex >= (uint)_prototypes.Length)
+                {
+                    continue;
+                }
+
+                TileLoaderInstancedVegetationPrototype prototype = _prototypes[placement.PrototypeIndex];
+                if (!prototype.SupportsPromotion)
+                {
+                    continue;
+                }
+
+                Vector3 worldPosition = transform.TransformPoint(placement.LocalPosition);
+                float sqrDistance = (worldPosition - targetWorldPosition).sqrMagnitude;
+                PlacementRuntimeState state = _placementStates[i];
+
+                if (!state.IsPromoted && sqrDistance <= promoteDistanceSq)
+                {
+                    PromotePlacement(i);
+                    didWork = true;
+                    promotionOrDemotionPerformed = true;
+                    break;
+                }
+
+                if (!state.IsPromoted || sqrDistance < demoteDistanceSq)
+                {
+                    continue;
+                }
+
+                TileLoaderPromotedVegetationInstance? marker = state.PromotedRoot != null
+                    ? state.PromotedRoot.GetComponent<TileLoaderPromotedVegetationInstance>()
+                    : null;
+                if (marker != null && marker.KeepAsGameObject)
+                {
+                    continue;
+                }
+
+                DemotePlacement(i);
+                didWork = true;
+                promotionOrDemotionPerformed = true;
+                break;
+            }
+
+            _nextInteractionPlacementIndex = (_nextInteractionPlacementIndex + placementsToCheck) % _placements.Length;
+            if (!promotionOrDemotionPerformed)
+            {
+                didWork |= ProcessPendingChildSnapGroups(ref remainingChildSnapGroups);
+            }
+
+            return didWork;
         }
     }
 
@@ -412,9 +540,12 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
     private IEnumerator BuildPrototypeRuntimesOverMultipleFrames()
     {
-        double frameBudgetMilliseconds = Math.Max(0.1f, _prototypeInitBudgetMsPerFrame);
+        double frameBudgetMilliseconds = _budgetOwner != null
+            ? _budgetOwner.ResolveRuntimePhaseBudgetMsInternal(_prototypeInitBudgetMsPerFrame)
+            : Math.Max(0.1f, _prototypeInitBudgetMsPerFrame);
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
+        _budgetOwner?.RestartRuntimeChunkStopwatch(frameStopwatch);
         var placementBuckets = new List<int>[_prototypes.Length];
 
         for (int placementIndex = 0; placementIndex < _placements.Length; placementIndex++)
@@ -424,6 +555,19 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             {
                 placementBuckets[placement.PrototypeIndex] ??= new List<int>();
                 placementBuckets[placement.PrototypeIndex].Add(placementIndex);
+            }
+
+            if (_budgetOwner != null)
+            {
+                if (!_budgetOwner.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds, minimumBudgetMilliseconds: 0.1d))
+                {
+                    continue;
+                }
+
+                _budgetOwner.CommitRuntimeChunk(frameStopwatch);
+                yield return null;
+                _budgetOwner.RestartRuntimeChunkStopwatch(frameStopwatch);
+                continue;
             }
 
             if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
@@ -448,6 +592,19 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
                 _prototypeRuntimes[prototypeIndex] = new PrototypeRuntime(
                     placementBuckets[prototypeIndex] ?? new List<int>(),
                     sharedRuntime.RenderEntries);
+            }
+
+            if (_budgetOwner != null)
+            {
+                if (!_budgetOwner.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds, minimumBudgetMilliseconds: 0.1d))
+                {
+                    continue;
+                }
+
+                _budgetOwner.CommitRuntimeChunk(frameStopwatch);
+                yield return null;
+                _budgetOwner.RestartRuntimeChunkStopwatch(frameStopwatch);
+                continue;
             }
 
             if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
@@ -516,6 +673,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
     private void PromotePlacement(int placementIndex)
     {
+        using (PromotePlacementMarker.Auto())
+        {
         if ((uint)placementIndex >= (uint)_placements.Length)
         {
             return;
@@ -540,7 +699,12 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         }
 
         Transform parent = GetOrCreatePromotedContainer();
-        GameObject instance = Instantiate(prototype.Prefab, parent, false);
+        GameObject instance;
+        using (SurfaceObjectChildSnapGroup.SuppressAutomaticRuntimeSnap())
+        {
+            instance = Instantiate(prototype.Prefab, parent, false);
+        }
+
         instance.name = prototype.Prefab.name;
         instance.transform.localPosition = placement.LocalPosition;
         instance.transform.localRotation = placement.LocalRotation;
@@ -549,6 +713,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         {
             ConformPromotedPlacementToTerrain(instance.transform, placement, prototype.IsTree);
         }
+
+        QueueChildSnapGroups(instance);
 
         TileLoaderPromotedVegetationInstance marker = instance.GetComponent<TileLoaderPromotedVegetationInstance>();
         if (marker == null)
@@ -559,6 +725,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         marker.PlacementIndex = placementIndex;
         state.PromotedRoot = instance;
         state.IsPromoted = true;
+        }
     }
 
     private void ConformPromotedPlacementToTerrain(
@@ -650,6 +817,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
     private void DemotePlacement(int placementIndex)
     {
+        using (DemotePlacementMarker.Auto())
+        {
         if ((uint)placementIndex >= (uint)_placementStates.Length)
         {
             return;
@@ -675,6 +844,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
         state.PromotedRoot = null;
         state.IsPromoted = false;
+        }
     }
 
     private Transform GetOrCreatePromotedContainer()
@@ -730,6 +900,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
     private void ReleaseRuntimeData()
     {
+        _budgetOwner?.UnregisterInstancedVegetationRendererInternal(this);
         if (_runtimeBuildCoroutine != null)
         {
             StopCoroutine(_runtimeBuildCoroutine);
@@ -742,9 +913,95 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         _prototypeRuntimes = Array.Empty<PrototypeRuntime>();
         _placementStates = Array.Empty<PlacementRuntimeState>();
         _promotedContainer = null;
+        _budgetOwner = null;
+        _nextInteractionPlacementIndex = 0;
+        _pendingChildSnapGroups.Clear();
+        _pendingChildSnapGroupIds.Clear();
         IsPrototypeRuntimeReady = false;
         LastPrototypeInitializationMilliseconds = 0d;
         LastInitializationCpuMilliseconds = 0d;
+    }
+
+    private void SyncInteractionSchedulerRegistration()
+    {
+        if (_budgetOwner == null)
+        {
+            return;
+        }
+
+        if (Application.isPlaying && _interactive)
+        {
+            _budgetOwner.RegisterInstancedVegetationRendererInternal(this);
+            return;
+        }
+
+        _budgetOwner.UnregisterInstancedVegetationRendererInternal(this);
+    }
+
+    private float ResolveInteractionUpdateOffsetSeconds()
+    {
+        int positiveId = Mathf.Abs(gameObject.GetInstanceID());
+        float normalized = (positiveId % 1024) / 1024f;
+        return normalized * MinimumInteractionUpdateInterval;
+    }
+
+    private void QueueChildSnapGroups(GameObject instance)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        SurfaceObjectChildSnapGroup[] snapGroups = instance.GetComponentsInChildren<SurfaceObjectChildSnapGroup>(true);
+        for (int i = 0; i < snapGroups.Length; i++)
+        {
+            SurfaceObjectChildSnapGroup snapGroup = snapGroups[i];
+            if (snapGroup == null)
+            {
+                continue;
+            }
+
+            int snapGroupId = snapGroup.GetInstanceID();
+            if (!_pendingChildSnapGroupIds.Add(snapGroupId))
+            {
+                continue;
+            }
+
+            _pendingChildSnapGroups.Enqueue(snapGroup);
+        }
+    }
+
+    private bool ProcessPendingChildSnapGroups(ref int remainingChildSnapGroups)
+    {
+        if (_pendingChildSnapGroups.Count == 0 || remainingChildSnapGroups <= 0)
+        {
+            return false;
+        }
+
+        bool processedAny = false;
+        while (remainingChildSnapGroups > 0 && _pendingChildSnapGroups.Count > 0)
+        {
+            SurfaceObjectChildSnapGroup snapGroup = _pendingChildSnapGroups.Dequeue();
+            if (snapGroup == null)
+            {
+                continue;
+            }
+
+            _pendingChildSnapGroupIds.Remove(snapGroup.GetInstanceID());
+            if (!snapGroup.isActiveAndEnabled)
+            {
+                continue;
+            }
+
+            using (ChildSnapMarker.Auto())
+            {
+                snapGroup.ApplyAtCurrentTransformAndFreeze();
+            }
+            remainingChildSnapGroups--;
+            processedAny = true;
+        }
+
+        return processedAny;
     }
 
     private Transform? ResolveInteractionTarget()

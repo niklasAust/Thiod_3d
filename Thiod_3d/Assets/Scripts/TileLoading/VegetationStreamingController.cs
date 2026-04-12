@@ -66,6 +66,18 @@ internal sealed class VegetationStreamingController
         owner.TryDispatchQueuedDynamicLoadInternal();
     }
 
+    private void EnsureTerrainStageVisible(GeneratedTerrainBatchState batchState, string stageLabel)
+    {
+        if (batchState.TerrainStageVisible)
+        {
+            return;
+        }
+
+        owner.PromoteGeneratedTerrainBatchInternal(batchState);
+        batchState.TerrainStageVisible = true;
+        owner.LogGenerationBatchSummaryInternal(batchState, stageLabel);
+    }
+
     public void CancelActiveVegetationPopulation()
     {
         if (ActiveVegetationPopulationCoroutine == null)
@@ -453,7 +465,13 @@ internal sealed class VegetationStreamingController
     private IEnumerator ContinueDeferredGenerationPhasesNextFrame(GeneratedTerrainBatchState batchState)
     {
         yield return null;
-        ContinueDeferredGenerationPhases(batchState);
+        if (!owner.IsPlayingInternal)
+        {
+            ContinueDeferredGenerationPhases(batchState);
+            yield break;
+        }
+
+        yield return ContinueDeferredGenerationPhasesOverMultipleFrames(batchState);
     }
 
     private void ContinueDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
@@ -483,6 +501,7 @@ internal sealed class VegetationStreamingController
                     () => owner.PopulateRiverDebugSplinesForBatchInternal(batchState));
                 break;
             case DeferredGenerationPhase.Vegetation:
+                EnsureTerrainStageVisible(batchState, "terrain-complete");
                 batchState.NextDeferredPhase = DeferredGenerationPhase.Completed;
                 if (owner.ShouldSpreadVegetationInstancingAcrossFramesInternal(batchState))
                 {
@@ -514,6 +533,154 @@ internal sealed class VegetationStreamingController
         FinishDeferredGenerationPhases(batchState);
     }
 
+    private IEnumerator ContinueDeferredGenerationPhasesOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+        {
+            owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+            yield break;
+        }
+
+        if (batchState.NextDeferredPhase == DeferredGenerationPhase.RiverWater)
+        {
+            batchState.NextDeferredPhase = DeferredGenerationPhase.DebugSplines;
+            yield return PopulateRiverWaterOverMultipleFrames(batchState);
+            if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+            {
+                owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+                yield break;
+            }
+        }
+
+        if (batchState.NextDeferredPhase == DeferredGenerationPhase.DebugSplines)
+        {
+            batchState.NextDeferredPhase = DeferredGenerationPhase.Vegetation;
+            if (!owner.IsPlayingInternal)
+            {
+                yield return PopulateRiverDebugSplinesOverMultipleFrames(batchState);
+            }
+            if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+            {
+                owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+                yield break;
+            }
+        }
+
+        if (batchState.NextDeferredPhase != DeferredGenerationPhase.Vegetation)
+        {
+            FinishDeferredGenerationPhases(batchState);
+            yield break;
+        }
+
+        EnsureTerrainStageVisible(batchState, "terrain-complete");
+        batchState.NextDeferredPhase = DeferredGenerationPhase.Completed;
+        if (owner.ShouldSpreadVegetationInstancingAcrossFramesInternal(batchState))
+        {
+            activeVegetationPopulationBatchState = batchState;
+            activeVegetationPopulationStopwatch = Stopwatch.StartNew();
+            ActiveVegetationPopulationCoroutine = owner.StartRuntimeCoroutine(PopulateVegetationOverMultipleFrames(batchState));
+            yield break;
+        }
+
+        owner.MeasureVegetationPlacementPhaseInternal(
+            batchState,
+            () =>
+            {
+                PopulateVegetationImmediately(batchState);
+                FinalizeVegetationClearOnlyTerrains(batchState);
+            });
+        FinishDeferredGenerationPhases(batchState);
+    }
+
+    private IEnumerator PopulateRiverWaterOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        var totalStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        var riverWaterSeams = new Dictionary<string, RiverWaterSeamCrossSection>(StringComparer.Ordinal);
+        int terrainCount = Math.Min(batchState.RiverRefreshRequests.Count, batchState.RiverRefreshTerrains.Count);
+        for (int i = 0; i < terrainCount; i++)
+        {
+            if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+            {
+                yield break;
+            }
+
+            GeneratedTerrainRequest request = batchState.RiverRefreshRequests[i];
+            GStylizedTerrain terrain = batchState.RiverRefreshTerrains[i];
+            int riverPathCount = owner.GetRiverWaterPathCountInternal(request, terrain);
+            if (riverPathCount == 0)
+            {
+                continue;
+            }
+
+            for (int riverPathIndex = 0; riverPathIndex < riverPathCount; riverPathIndex++)
+            {
+                if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+                {
+                    yield break;
+                }
+
+                owner.PopulateRiverWaterForPathInternal(
+                    request,
+                    terrain,
+                    riverPathIndex,
+                    batchState.NormalizationMinHeight,
+                    batchState.NormalizationMaxHeight,
+                    batchState.RiverSplineCache,
+                    riverWaterSeams);
+
+                if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, owner.RuntimeGlobalBudgetMsPerFrameInternal))
+                {
+                    continue;
+                }
+
+                owner.CommitRuntimeChunk(frameStopwatch);
+                yield return null;
+                owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+            }
+        }
+
+        totalStopwatch.Stop();
+        owner.RecordGenerationPhaseTimingInternal(batchState, "river water", totalStopwatch.Elapsed);
+        owner.LogGenerationPhaseTimingInternal("river water", totalStopwatch.Elapsed);
+    }
+
+    private IEnumerator PopulateRiverDebugSplinesOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        var totalStopwatch = Stopwatch.StartNew();
+        var frameStopwatch = Stopwatch.StartNew();
+        owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        int terrainCount = Math.Min(batchState.RiverRefreshRequests.Count, batchState.RiverRefreshTerrains.Count);
+        for (int i = 0; i < terrainCount; i++)
+        {
+            if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+            {
+                yield break;
+            }
+
+            owner.PopulateRiverDebugSplinesForTerrainInternal(
+                batchState.RiverRefreshRequests[i],
+                batchState.RiverRefreshTerrains[i],
+                batchState.NormalizationMinHeight,
+                batchState.NormalizationMaxHeight,
+                batchState.RiverSplineCache);
+
+            if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, owner.RuntimeGlobalBudgetMsPerFrameInternal))
+            {
+                continue;
+            }
+
+            owner.CommitRuntimeChunk(frameStopwatch);
+            yield return null;
+            owner.RestartRuntimeChunkStopwatch(frameStopwatch);
+        }
+
+        totalStopwatch.Stop();
+        owner.RecordGenerationPhaseTimingInternal(batchState, "river debug splines", totalStopwatch.Elapsed);
+        owner.LogGenerationPhaseTimingInternal("river debug splines", totalStopwatch.Elapsed);
+    }
+
     private IEnumerator PopulateVegetationOverMultipleFrames(GeneratedTerrainBatchState batchState)
     {
         bool completed = false;
@@ -527,8 +694,9 @@ internal sealed class VegetationStreamingController
             owner.RecordGenerationPhaseTimingInternal(batchState, "vegetation queue prep", queuePrepStopwatch.Elapsed);
             owner.LogGenerationPhaseTimingInternal("vegetation queue prep", queuePrepStopwatch.Elapsed);
 
-            double frameBudgetMilliseconds = Math.Max(0.25f, owner.VegetationPlacementBudgetMsPerFrameInternal);
+            double frameBudgetMilliseconds = owner.ResolveRuntimePhaseBudgetMsInternal(owner.VegetationPlacementBudgetMsPerFrameInternal);
             var frameStopwatch = Stopwatch.StartNew();
+            owner.RestartRuntimeChunkStopwatch(frameStopwatch);
 
             for (int workItemIndex = 0; workItemIndex < workItems.Count; workItemIndex++)
             {
@@ -540,13 +708,14 @@ internal sealed class VegetationStreamingController
                 VegetationWorkItem workItem = workItems[workItemIndex];
                 while (owner.ProcessNextVegetationWorkItemPlacementInternal(workItem, totalStopwatch))
                 {
-                    if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+                    if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds))
                     {
                         continue;
                     }
 
-                    frameStopwatch.Restart();
+                    owner.CommitRuntimeChunk(frameStopwatch);
                     yield return null;
+                    owner.RestartRuntimeChunkStopwatch(frameStopwatch);
                     if (batchState.PipelineId != owner.ActiveGenerationPipelineIdInternal)
                     {
                         yield break;
@@ -554,13 +723,14 @@ internal sealed class VegetationStreamingController
                 }
 
                 owner.FinalizeVegetationWorkItemInternal(workItem, totalStopwatch);
-                if (frameStopwatch.Elapsed.TotalMilliseconds < frameBudgetMilliseconds)
+                if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds))
                 {
                     continue;
                 }
 
-                frameStopwatch.Restart();
+                owner.CommitRuntimeChunk(frameStopwatch);
                 yield return null;
+                owner.RestartRuntimeChunkStopwatch(frameStopwatch);
             }
 
             totalStopwatch.Stop();

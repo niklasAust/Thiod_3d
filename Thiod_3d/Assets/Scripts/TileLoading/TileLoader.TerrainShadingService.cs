@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using Unity.Profiling;
 using UnityEngine.Rendering;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -9,6 +10,17 @@ using Pinwheel.Griffin;
 using Pinwheel.Griffin.API;
 
 #nullable enable
+
+[Flags]
+internal enum TileLoaderTerrainSeamMask
+{
+    None = 0,
+    Left = 1 << 0,
+    Right = 1 << 1,
+    Bottom = 1 << 2,
+    Top = 1 << 3,
+    All = Left | Right | Bottom | Top,
+}
 
 internal sealed class TerrainShadingSettings
 {
@@ -57,6 +69,7 @@ internal sealed class TerrainShadingSettings
 
 internal sealed class TileLoaderTerrainShadingService
 {
+    private static readonly ProfilerMarker SeamMeshUpdateMarker = new("TileLoader.TerrainSeams.MeshUpdate");
     private readonly TerrainShadingSettings settings;
     private readonly string defaultLowlandTerrainMaterialAssetPath;
     private readonly string defaultLowlandTerrainMaterialVariantAssetPath;
@@ -330,6 +343,38 @@ internal sealed class TileLoaderTerrainShadingService
         }
     }
 
+    public void ConnectAdjacentTerrainTiles()
+    {
+        GStylizedTerrain.ConnectAdjacentTiles();
+    }
+
+    public void RebuildTerrainSeams(GStylizedTerrain terrain, TileLoaderTerrainSeamMask seamMask, UnityEngine.Object owner)
+    {
+        if (terrain == null || terrain.TerrainData?.Geometry == null)
+        {
+            return;
+        }
+
+        Rect[] dirtyRegions = BuildSeamDirtyRegions(terrain, seamMask);
+        if (dirtyRegions.Length == 0)
+        {
+            return;
+        }
+
+        using (SeamMeshUpdateMarker.Auto())
+        {
+            for (int i = 0; i < dirtyRegions.Length; i++)
+            {
+                terrain.TerrainData.Geometry.SetRegionDirty(dirtyRegions[i]);
+            }
+
+            Polaris.UpdateTerrainMesh(terrain, dirtyRegions);
+        }
+
+        terrain.TerrainData.Shading.UpdateMaterials();
+        ApplyTerrainDecalRenderingLayer(terrain, owner);
+    }
+
     public static Color[] BuildHeightPixels(double[,] heightmap, double maxTileHeightUnits)
     {
         int resolutionY = heightmap.GetLength(0);
@@ -347,6 +392,20 @@ internal sealed class TileLoaderTerrainShadingService
         }
 
         return pixels;
+    }
+
+    private static Rect[] BuildSeamDirtyRegions(GStylizedTerrain terrain, TileLoaderTerrainSeamMask seamMask)
+    {
+        if (seamMask == TileLoaderTerrainSeamMask.None)
+        {
+            return Array.Empty<Rect>();
+        }
+
+        // Polaris stitches seams across the terrain's internal chunk grid during mesh regeneration.
+        // Rebuilding only the outer edge strips can leave adjacent interior chunk boundaries stale,
+        // which shows up as visible cracks between the smaller chunk meshes. Regenerate the full
+        // terrain mesh here for correctness.
+        return new[] { new Rect(0f, 0f, 1f, 1f) };
     }
 
     private Material CreateTerrainMaterial(GTexturingModel texturingModel, UnityEngine.Object owner)

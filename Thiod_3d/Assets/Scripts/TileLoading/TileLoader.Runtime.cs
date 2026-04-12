@@ -90,6 +90,7 @@ internal sealed class TileLoaderRuntime
 
         bool dynamicLoadTriggered = owner.DynamicTileLoadingEnabled && dynamicTileScheduler.Refresh(owner);
         owner.UpdatePlayerCentricSurfaceVegetationInternal(forceImmediate: false);
+        owner.UpdateScheduledInstancedVegetationInteractionsInternal();
         if (dynamicLoadTriggered)
         {
             return;

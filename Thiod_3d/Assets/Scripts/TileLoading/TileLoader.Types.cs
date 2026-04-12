@@ -850,6 +850,7 @@ internal sealed class GeneratedTerrainBatchState
     public Dictionary<string, int> VegetationQueuedPlacementsByBucket { get; }
     public Dictionary<string, int> VegetationQueuedWorkItemsByBucket { get; }
     public Vector3? VegetationStreamingTargetWorldPosition { get; set; }
+    public bool TerrainStageVisible { get; set; }
     public int ReusedTerrainCount { get; set; }
     public int RemovedTerrainCount { get; set; }
     public int ReusedRequestCount { get; set; }
