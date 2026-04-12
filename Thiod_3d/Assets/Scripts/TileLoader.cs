@@ -258,6 +258,7 @@ public sealed partial class TileLoader : MonoBehaviour
     private readonly HashSet<TileLoaderInstancedVegetationRenderer> scheduledInteractiveVegetationRendererSet = new();
     private int nextScheduledInteractiveVegetationRendererIndex;
     private int lastCompletedGenerationPipelineId;
+    private Vector3Int? lastCompletedRuntimeNeighborhoodCenterTileCoordinate;
     private bool terrainPhaseLoadInProgress;
     private Coroutine? activeTerrainLoadCoroutine;
     private TileLoaderTerrainSampler? cachedTerrainSampler;
@@ -367,6 +368,11 @@ public sealed partial class TileLoader : MonoBehaviour
         get => lastCompletedGenerationPipelineId;
         set => lastCompletedGenerationPipelineId = value;
     }
+    internal Vector3Int? LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal
+    {
+        get => lastCompletedRuntimeNeighborhoodCenterTileCoordinate;
+        set => lastCompletedRuntimeNeighborhoodCenterTileCoordinate = value;
+    }
     internal Vector3? LastVegetationStreamingTargetWorldPositionInternal
     {
         get => lastVegetationStreamingTargetWorldPosition;
@@ -400,6 +406,7 @@ public sealed partial class TileLoader : MonoBehaviour
         get => activeRuntimeRequestedTileCoordinate;
         set => activeRuntimeRequestedTileCoordinate = value;
     }
+    internal Vector3Int? TileGateBlockedUnityTileCoordinateInternal => runtime?.BlockedDynamicUnityTileCoordinateInternal;
     internal GeneratedTerrainBatchCacheEntry? CachedTerrainBatchInternal
     {
         get => cachedTerrainBatch;
@@ -426,6 +433,7 @@ public sealed partial class TileLoader : MonoBehaviour
         hasLoadedInCurrentEnableCycle = false;
         cachedTerrainSampler = null;
         lastVegetationStreamingTargetWorldPosition = null;
+        lastCompletedRuntimeNeighborhoodCenterTileCoordinate = null;
         runtimeVegetationTileStatusByCoordinate.Clear();
         terrainSceneFacade ??= new TerrainSceneFacade(this);
         terrainStreamingPipeline ??= new TerrainStreamingPipeline(this);
@@ -442,6 +450,7 @@ public sealed partial class TileLoader : MonoBehaviour
         terrainPhaseLoadInProgress = false;
         cachedTerrainSampler = null;
         activeRuntimeRequestedTileCoordinate = null;
+        lastCompletedRuntimeNeighborhoodCenterTileCoordinate = null;
         runtimeVegetationTileStatusByCoordinate.Clear();
         runtimeFrameBudgetCoordinator?.Reset();
         playerCentricSurfaceController?.ResetState();
@@ -2220,6 +2229,7 @@ public sealed partial class TileLoader : MonoBehaviour
         nextConiferOptimizationTime = 0f;
         ClearPlayerCentricSurfaceCaches();
         lastCompletedGenerationPipelineId = 0;
+        lastCompletedRuntimeNeighborhoodCenterTileCoordinate = null;
         runtimeVegetationTileStatusByCoordinate.Clear();
         TerrainScene.ClearGeneratedTerrains();
         activeLoadedUnityTileCoordinate = null;

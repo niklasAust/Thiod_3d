@@ -12,8 +12,10 @@ internal sealed class TileLoaderRuntime
     private readonly TileLoader owner;
     private readonly DynamicTileScheduler dynamicTileScheduler;
     private Vector2Int? lastSettledTileCoordinate;
+    private Vector2Int? blockedTileCoordinate;
     private Vector3 lastSettledWorldPosition;
     private bool hasLastSettledWorldPosition;
+    private bool isTileGateBlocking;
     private GameObject? loadingOverlayRoot;
     private RectTransform? loadingSpinnerRect;
     private CanvasGroup? loadingOverlayCanvasGroup;
@@ -122,6 +124,14 @@ internal sealed class TileLoaderRuntime
             return;
         }
 
+        if (ShouldHoldConiferOptimizationAtFull())
+        {
+            owner.ApplyConiferOptimizationToAllInternal(ConiferOptimizationTier.Full);
+            owner.ConiferOptimizationWasActive = false;
+            owner.NextConiferOptimizationTime = Time.unscaledTime + Mathf.Max(0.05f, owner.ConiferOptimizationIntervalInternal);
+            return;
+        }
+
         owner.ConiferOptimizationWasActive = true;
         if (Time.unscaledTime < owner.NextConiferOptimizationTime)
         {
@@ -152,6 +162,20 @@ internal sealed class TileLoaderRuntime
         return dynamicTileScheduler.TryGetCurrentPlayerTileCoordinate(owner, out tileCoordinate);
     }
 
+    internal Vector3Int? BlockedDynamicUnityTileCoordinateInternal
+    {
+        get
+        {
+            if (!blockedTileCoordinate.HasValue)
+            {
+                return null;
+            }
+
+            Vector2Int blockedTile = blockedTileCoordinate.Value;
+            return new Vector3Int(blockedTile.x, blockedTile.y, owner.UnityTileCoordinate.z);
+        }
+    }
+
     public Vector3Int ResolveCurrentDesiredDynamicNeighborhoodCenter(Vector3Int fallbackTileCoordinate)
     {
         return dynamicTileScheduler.ResolveCurrentDesiredDynamicNeighborhoodCenter(owner, fallbackTileCoordinate);
@@ -179,11 +203,65 @@ internal sealed class TileLoaderRuntime
         }
 
         var currentTile = new Vector2Int(currentTileCoordinate.x, currentTileCoordinate.y);
-        if (owner.IsRuntimeVegetationTileSettledInternal(currentTile))
+        if (!lastSettledTileCoordinate.HasValue)
+        {
+            if (owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal.HasValue)
+            {
+                Vector3Int completedCenterCoordinate = owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal.Value;
+                lastSettledTileCoordinate = new Vector2Int(completedCenterCoordinate.x, completedCenterCoordinate.y);
+                lastSettledWorldPosition = target.position;
+                hasLastSettledWorldPosition = true;
+            }
+            else if (owner.ActiveLoadedUnityTileCoordinate.HasValue)
+            {
+                Vector3Int activeLoadedTileCoordinate = owner.ActiveLoadedUnityTileCoordinate.Value;
+                var activeLoadedTile = new Vector2Int(activeLoadedTileCoordinate.x, activeLoadedTileCoordinate.y);
+                if (owner.IsRuntimeVegetationTileSettledInternal(activeLoadedTile) &&
+                    !owner.IsTerrainPhaseLoadInProgress &&
+                    !owner.ActiveRuntimeRequestedTileCoordinateInternal.HasValue)
+                {
+                    lastSettledTileCoordinate = activeLoadedTile;
+                    lastSettledWorldPosition = target.position;
+                    hasLastSettledWorldPosition = true;
+                }
+            }
+        }
+
+        if (blockedTileCoordinate.HasValue)
+        {
+            Vector2Int blockedTile = blockedTileCoordinate.Value;
+            if (IsTileGateReleasedForTile(blockedTile))
+            {
+                blockedTileCoordinate = null;
+                isTileGateBlocking = false;
+                HideLoadingOverlay();
+                return;
+            }
+
+            if (!lastSettledTileCoordinate.HasValue)
+            {
+                isTileGateBlocking = false;
+                HideLoadingOverlay();
+                return;
+            }
+
+            Vector3 blockedWorldPosition = ResolveGatedWorldPosition(
+                target.position,
+                lastSettledTileCoordinate.Value,
+                blockedTile);
+            ApplyTileGatePosition(target, blockedWorldPosition);
+            isTileGateBlocking = true;
+            ShowLoadingOverlay();
+            return;
+        }
+
+        if (IsTileGateReleasedForTile(currentTile))
         {
             lastSettledTileCoordinate = currentTile;
             lastSettledWorldPosition = target.position;
             hasLastSettledWorldPosition = true;
+            blockedTileCoordinate = null;
+            isTileGateBlocking = false;
             HideLoadingOverlay();
             return;
         }
@@ -192,30 +270,27 @@ internal sealed class TileLoaderRuntime
         {
             lastSettledWorldPosition = target.position;
             hasLastSettledWorldPosition = true;
+            blockedTileCoordinate = null;
+            isTileGateBlocking = false;
             HideLoadingOverlay();
             return;
         }
 
         if (!lastSettledTileCoordinate.HasValue)
         {
-            if (owner.ActiveLoadedUnityTileCoordinate.HasValue)
-            {
-                Vector3Int activeLoadedTileCoordinate = owner.ActiveLoadedUnityTileCoordinate.Value;
-                var activeLoadedTile = new Vector2Int(activeLoadedTileCoordinate.x, activeLoadedTileCoordinate.y);
-                if (owner.IsRuntimeVegetationTileSettledInternal(activeLoadedTile))
-                {
-                    lastSettledTileCoordinate = activeLoadedTile;
-                    lastSettledWorldPosition = target.position;
-                    hasLastSettledWorldPosition = true;
-                }
-            }
-
+            blockedTileCoordinate = null;
+            isTileGateBlocking = false;
             HideLoadingOverlay();
             return;
         }
 
-        Vector3 gatedWorldPosition = ResolveGatedWorldPosition(target.position, lastSettledTileCoordinate.Value, currentTile);
+        blockedTileCoordinate = currentTile;
+        Vector3 gatedWorldPosition = ResolveGatedWorldPosition(
+            target.position,
+            lastSettledTileCoordinate.Value,
+            blockedTileCoordinate.Value);
         ApplyTileGatePosition(target, gatedWorldPosition);
+        isTileGateBlocking = true;
         ShowLoadingOverlay();
     }
 
@@ -294,7 +369,7 @@ internal sealed class TileLoaderRuntime
         }
 
         Rigidbody? rigidbody = target.GetComponentInParent<Rigidbody>();
-        if (rigidbody != null)
+        if (rigidbody != null && !rigidbody.isKinematic)
         {
             rigidbody.linearVelocity = Vector3.zero;
             rigidbody.angularVelocity = Vector3.zero;
@@ -378,12 +453,6 @@ internal sealed class TileLoaderRuntime
             return loadingSpinnerSprite;
         }
 
-        loadingSpinnerSprite = Resources.GetBuiltinResource<Sprite>("UI/Skin/Knob.psd");
-        if (loadingSpinnerSprite != null)
-        {
-            return loadingSpinnerSprite;
-        }
-
         loadingSpinnerSprite = Sprite.Create(
             Texture2D.whiteTexture,
             new Rect(0f, 0f, Texture2D.whiteTexture.width, Texture2D.whiteTexture.height),
@@ -394,8 +463,10 @@ internal sealed class TileLoaderRuntime
     private void ResetTileGateState(bool destroyOverlay)
     {
         lastSettledTileCoordinate = null;
+        blockedTileCoordinate = null;
         lastSettledWorldPosition = default;
         hasLastSettledWorldPosition = false;
+        isTileGateBlocking = false;
 
         if (destroyOverlay && loadingOverlayRoot != null)
         {
@@ -408,5 +479,41 @@ internal sealed class TileLoaderRuntime
         {
             HideLoadingOverlay();
         }
+    }
+
+    private bool IsTileGateReleasedForTile(Vector2Int tileCoordinate)
+    {
+        if (owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal.HasValue)
+        {
+            Vector3Int completedCenterCoordinate = owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal.Value;
+            if (completedCenterCoordinate.x == tileCoordinate.x &&
+                completedCenterCoordinate.y == tileCoordinate.y)
+            {
+                return true;
+            }
+        }
+
+        if (owner.IsTerrainPhaseLoadInProgress || owner.ActiveRuntimeRequestedTileCoordinateInternal.HasValue)
+        {
+            return false;
+        }
+
+        if (!owner.ActiveLoadedUnityTileCoordinate.HasValue)
+        {
+            return false;
+        }
+
+        Vector3Int activeLoadedTileCoordinate = owner.ActiveLoadedUnityTileCoordinate.Value;
+        return activeLoadedTileCoordinate.x == tileCoordinate.x &&
+               activeLoadedTileCoordinate.y == tileCoordinate.y &&
+               owner.IsRuntimeVegetationTileSettledInternal(tileCoordinate);
+    }
+
+    private bool ShouldHoldConiferOptimizationAtFull()
+    {
+        return owner.DynamicTileLoadingEnabled &&
+               (owner.IsTerrainPhaseLoadInProgress ||
+                owner.ActiveRuntimeRequestedTileCoordinateInternal.HasValue ||
+                isTileGateBlocking);
     }
 }

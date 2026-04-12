@@ -39,7 +39,12 @@ internal sealed class DynamicTileScheduler
         }
 
         nextDynamicLoadCheckTime = Time.unscaledTime + Mathf.Max(0.01f, owner.DynamicLoadCheckIntervalSeconds);
-        if (!TryGetDynamicLoadTargetTileCoordinate(owner, out Vector3Int runtimeTileCoordinate))
+        Vector3Int runtimeTileCoordinate;
+        if (owner.TileGateBlockedUnityTileCoordinateInternal.HasValue)
+        {
+            runtimeTileCoordinate = owner.TileGateBlockedUnityTileCoordinateInternal.Value;
+        }
+        else if (!TryGetDynamicLoadTargetTileCoordinate(owner, out runtimeTileCoordinate))
         {
             return false;
         }
@@ -139,6 +144,12 @@ internal sealed class DynamicTileScheduler
 
     public bool TryGetCurrentPlayerTileCoordinate(TileLoader owner, out Vector3Int tileCoordinate)
     {
+        if (owner.TileGateBlockedUnityTileCoordinateInternal.HasValue)
+        {
+            tileCoordinate = owner.TileGateBlockedUnityTileCoordinateInternal.Value;
+            return true;
+        }
+
         Transform? target = ResolveDynamicLoadTarget(owner);
         if (target != null &&
             owner.TryGetUnityTileCoordinateForWorldPositionInternal(target.position, out tileCoordinate))
@@ -158,6 +169,11 @@ internal sealed class DynamicTileScheduler
 
     public Vector3Int ResolveCurrentDesiredDynamicNeighborhoodCenter(TileLoader owner, Vector3Int fallbackTileCoordinate)
     {
+        if (owner.TileGateBlockedUnityTileCoordinateInternal.HasValue)
+        {
+            return owner.TileGateBlockedUnityTileCoordinateInternal.Value;
+        }
+
         if (queuedDynamicUnityTileCoordinate.HasValue)
         {
             return queuedDynamicUnityTileCoordinate.Value;
@@ -410,6 +426,11 @@ internal sealed class DynamicTileScheduler
 
     private Vector3Int ResolveLatchedDynamicLoadCoordinate(TileLoader owner, Vector3Int fallbackCoordinate)
     {
+        if (owner.TileGateBlockedUnityTileCoordinateInternal.HasValue)
+        {
+            return owner.TileGateBlockedUnityTileCoordinateInternal.Value;
+        }
+
         if (queuedDynamicUnityTileCoordinate.HasValue)
         {
             return queuedDynamicUnityTileCoordinate.Value;

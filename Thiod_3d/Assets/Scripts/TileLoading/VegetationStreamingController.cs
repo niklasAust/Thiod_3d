@@ -55,6 +55,7 @@ internal sealed class VegetationStreamingController
             batchState.VegetationStreamingTargetWorldPosition ??
             owner.ResolveVegetationStreamingTargetWorldPositionInternal();
         owner.LastCompletedGenerationPipelineIdInternal = batchState.PipelineId;
+        owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal = batchState.CenterTileCoordinate;
         if (owner.ActiveRuntimeRequestedTileCoordinateInternal.HasValue &&
             owner.ActiveRuntimeRequestedTileCoordinateInternal.Value == batchState.CenterTileCoordinate)
         {
@@ -777,8 +778,8 @@ internal sealed class VegetationStreamingController
     {
         return bucket switch
         {
-            VegetationPriorityBucket.CenterCanopyAndLarge => 128,
-            VegetationPriorityBucket.OuterCanopyAndLarge => 160,
+            VegetationPriorityBucket.CenterCanopyAndLarge => 32,
+            VegetationPriorityBucket.OuterCanopyAndLarge => 48,
             VegetationPriorityBucket.CenterClutterAndGround => 192,
             VegetationPriorityBucket.OuterClutter => 192,
             VegetationPriorityBucket.OuterGroundAndDebris => 192,
