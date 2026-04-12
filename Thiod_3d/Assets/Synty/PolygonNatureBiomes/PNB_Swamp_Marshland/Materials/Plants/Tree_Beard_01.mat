@@ -95,6 +95,8 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
+    - _invertNormalsForBackFace: 0
+    - _Backface_Darken: 1
     - _AlphaClip: 1
     - _AlphaToMask: 1
     - _Alpha_Clip_Threshold: 0.5
@@ -199,3 +201,5 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   version: 10
+
+

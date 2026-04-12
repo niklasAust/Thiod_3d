@@ -372,7 +372,8 @@ public class SyntyFoliage_customGUI : ShaderGUI
                     "_Leaf_Base_Color",
                     "_Leaf_Noise_Color",
                     "_Leaf_Noise_Large_Color",
-                    "_Leaf_Flat_Color"
+                    "_Leaf_Flat_Color",
+                    "_Backface_Darken"
         };
         setProperties(materialEditor, properties, leafProperties, vecGuiProperties);
         EditorGUILayout.EndVertical();
@@ -393,7 +394,8 @@ public class SyntyFoliage_customGUI : ShaderGUI
                 "_Leaf_Normal",
                 "_Leaf_Normal_Tiling",
                 "_Leaf_Normal_Offset",
-                "_Leaf_Normal_Strength"
+                "_Leaf_Normal_Strength",
+                "_invertNormalsForBackFace"
             };
             setProperties(materialEditor, properties, leafNormals, vecGuiProperties);
         }
@@ -715,7 +717,11 @@ public class SyntyFoliage_customGUI : ShaderGUI
     {
         foreach (string property in shaderProperties)
         {
-            MaterialProperty propertyReference = FindProperty(property, properties);
+            MaterialProperty propertyReference = FindPropertyIfExists(property, properties);
+            if (propertyReference == null)
+            {
+                continue;
+            }
 
             if (vecGuiProperties.ContainsKey(property))
             {
@@ -742,6 +748,19 @@ public class SyntyFoliage_customGUI : ShaderGUI
 
 
         }
+    }
+
+    private static MaterialProperty FindPropertyIfExists(string propertyName, MaterialProperty[] properties)
+    {
+        foreach (MaterialProperty property in properties)
+        {
+            if (property != null && property.name == propertyName)
+            {
+                return property;
+            }
+        }
+
+        return null;
     }
     #endregion
 }

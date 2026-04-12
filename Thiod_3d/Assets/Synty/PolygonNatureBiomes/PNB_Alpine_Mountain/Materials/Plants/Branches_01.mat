@@ -60,6 +60,8 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
+    - _invertNormalsForBackFace: 0
+    - _Backface_Darken: 1
     - _ColourNoiseLargeScale: 0
     - _ColourNoiseSmallScale: 0
     - _Cull: 0
@@ -101,3 +103,5 @@ Material:
     - _TrunkBaseColour: {r: 0.07843138, g: 0.02015968, b: 0, a: 0}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
+
+

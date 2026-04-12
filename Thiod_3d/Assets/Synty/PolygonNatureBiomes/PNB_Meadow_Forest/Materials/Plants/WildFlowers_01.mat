@@ -58,6 +58,8 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
+    - _invertNormalsForBackFace: 0
+    - _Backface_Darken: 1
     - _Alpha_Clip_Threshold: 0.25
     - _Color_Noise_Large_Freq: 1.09
     - _Color_Noise_Small_Freq: 16.05
@@ -98,3 +100,5 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   version: 10
+
+

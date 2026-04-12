@@ -31,6 +31,8 @@ Material:
     m_TexEnvs: []
     m_Ints: []
     m_Floats:
+    - _invertNormalsForBackFace: 0
+    - _Backface_Darken: 1
     - _BUILTIN_QueueControl: 0
     - _Enable_Light_Wind: 0
     - _Enable_Strong_Wind: 1
@@ -67,3 +69,5 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Unity.ShaderGraph.Editor::UnityEditor.Rendering.BuiltIn.AssetVersion
   version: 0
+
+
