@@ -450,10 +450,10 @@ public sealed partial class TileLoader : MonoBehaviour
                 : VegetationDensityZone.High;
         }
 
+        bool isSeamRiskPlacement = IsSeamRiskPlacement(localPosition);
         bool useExactTerrainConformOnLoad =
-            treatAsTreeLikePlacement ||
             ShouldUseExactTerrainConformOnLoad(distanceToTargetSq) ||
-            IsSeamRiskPlacement(localPosition);
+            isSeamRiskPlacement;
         bool useExactTerrainConformOnPromotion =
             SupportsHybridPromotion(placement);
         geometry = new PreparedPlacementGeometry(
@@ -462,7 +462,7 @@ public sealed partial class TileLoader : MonoBehaviour
             worldPosition,
             distanceToTargetSq,
             densityZone,
-            IsSeamRiskPlacement(localPosition),
+            isSeamRiskPlacement,
             useExactTerrainConformOnLoad,
             useExactTerrainConformOnPromotion);
         return true;
@@ -510,8 +510,8 @@ public sealed partial class TileLoader : MonoBehaviour
             return true;
         }
 
-        float interactionRadius = Mathf.Max(0f, vegetationInteractionRadiusMeters);
-        return interactionRadius <= 0f || distanceToTargetSq <= interactionRadius * interactionRadius;
+        float exactConformRadius = Mathf.Max(0f, highDetailTerrainConformRadiusMeters);
+        return exactConformRadius <= 0f || distanceToTargetSq <= exactConformRadius * exactConformRadius;
     }
 
     private bool IsSeamRiskPlacement(Vector3 localPosition)

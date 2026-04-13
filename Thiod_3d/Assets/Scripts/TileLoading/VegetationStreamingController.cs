@@ -116,8 +116,14 @@ internal sealed class VegetationStreamingController
             {
                 for (int i = 0; i < terrainCount; i++)
                 {
+                    GStylizedTerrain terrain = batchState.VegetationRefreshTerrains[i];
+                    if (!IsValidVegetationRefreshTerrain(terrain))
+                    {
+                        continue;
+                    }
+
                     owner.PopulatePlacedObjectsLegacyInternal(
-                        batchState.VegetationRefreshTerrains[i],
+                        terrain,
                         batchState.VegetationRefreshRequests[i],
                         batchState.NormalizationMinHeight,
                         batchState.NormalizationMaxHeight);
@@ -158,6 +164,11 @@ internal sealed class VegetationStreamingController
         {
             GeneratedTerrainRequest request = batchState.VegetationRefreshRequests[i];
             GStylizedTerrain terrain = batchState.VegetationRefreshTerrains[i];
+            if (!IsValidVegetationRefreshTerrain(terrain))
+            {
+                continue;
+            }
+
             Vector2Int tileCoordinate = owner.GetTileCoordinateInternal(request);
             Transform? existingVegetationContainer = owner.FindVegetationContainerInternal(terrain.transform);
             if (request.Layers.PlacedObjects == null || request.Layers.PlacedObjects.Count == 0)
@@ -306,6 +317,12 @@ internal sealed class VegetationStreamingController
 
         owner.TryLogVegetationWorkQueueSummaryInternal(batchState, orderedWorkItems);
         return orderedWorkItems;
+    }
+
+    private static bool IsValidVegetationRefreshTerrain(GStylizedTerrain terrain)
+    {
+        return terrain != null &&
+               terrain.TerrainData != null;
     }
 
     public void FinalizeVegetationClearOnlyTerrains(GeneratedTerrainBatchState batchState)

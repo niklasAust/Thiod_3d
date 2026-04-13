@@ -1019,7 +1019,9 @@ internal sealed class PlayerCentricSurfaceController
         instancedPlacement = default;
         Vector3 localPosition = preparedPlacement.Geometry.LocalPosition;
         Vector3 localNormal = preparedPlacement.Geometry.LocalNormal;
-        if (preparedPlacement.Geometry.UseExactTerrainConformOnLoad &&
+        bool requiresExactTerrainConform = preparedPlacement.Geometry.UseExactTerrainConformOnLoad;
+        // Cache build uses the prepared heightmap geometry unless this placement is near-player or seam-risk.
+        if (requiresExactTerrainConform &&
             owner.TrySampleGeneratedTerrainSurfaceInternal(
                 buildState.Terrain,
                 preparedPlacement.Geometry.LocalPosition.x,

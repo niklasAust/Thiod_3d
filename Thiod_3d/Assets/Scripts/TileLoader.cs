@@ -3346,9 +3346,11 @@ public sealed partial class TileLoader : MonoBehaviour
         Vector3 localNormal = preparedPlacement.Geometry.LocalNormal;
         usedExactTerrainConform = false;
         float verticalOffset = isTreeObject ? treeObjectVerticalOffset : surfaceObjectVerticalOffset;
+        bool requiresExactTerrainConform = preparedPlacement.Geometry.UseExactTerrainConformOnLoad;
 
         var positionStopwatch = Stopwatch.StartNew();
-        if (preparedPlacement.Geometry.UseExactTerrainConformOnLoad &&
+        // Distant placements keep the precomputed heightmap position/normal and skip the terrain raycast.
+        if (requiresExactTerrainConform &&
             TrySampleGeneratedTerrainSurface(
                 buildState.Terrain,
                 preparedPlacement.Geometry.LocalPosition.x,
