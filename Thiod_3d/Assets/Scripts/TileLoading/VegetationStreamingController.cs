@@ -7,76 +7,103 @@ using UnityEngine;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class VegetationStreamingController
 {
-    private readonly TileLoader owner;
+    private readonly IVegetationStreamingLifecyclePort lifecycle;
+    private readonly IVegetationStreamingExecutionPort execution;
+    private readonly IVegetationStreamingReportingPort reporting;
+    private readonly IGenerationTelemetryPort telemetry;
+    private readonly IVegetationStreamingBudgetPort budget;
+    private readonly IVegetationDeferredWorkflowOwner workflowOwner;
+    private readonly VegetationStreamingRiverPhaseProcessor riverPhases;
+    private readonly TileLoaderDeferredWorkflow deferredWorkflow;
     private GeneratedTerrainBatchState? activeVegetationPopulationBatchState;
     private Stopwatch? activeVegetationPopulationStopwatch;
 
-    public VegetationStreamingController(TileLoader owner)
+    public VegetationStreamingController(
+        IVegetationStreamingLifecyclePort lifecycle,
+        IVegetationStreamingExecutionPort execution,
+        IVegetationStreamingReportingPort reporting,
+        IGenerationTelemetryPort telemetry,
+        IVegetationStreamingBudgetPort budget,
+        IVegetationDeferredWorkflowOwner workflowOwner,
+        IVegetationStreamingRiverPhaseOwner riverPhaseOwner)
     {
-        this.owner = owner;
+        this.lifecycle = lifecycle;
+        this.execution = execution;
+        this.reporting = reporting;
+        this.telemetry = telemetry;
+        this.budget = budget;
+        this.workflowOwner = workflowOwner;
+        riverPhases = new VegetationStreamingRiverPhaseProcessor(riverPhaseOwner);
+        deferredWorkflow = new TileLoaderDeferredWorkflow(
+            workflowOwner,
+            riverPhases,
+            EnsureTerrainStageVisible,
+            ExecuteVegetationDeferredPhase);
     }
 
     public Coroutine? ActiveVegetationPopulationCoroutine { get; private set; }
 
     public void ScheduleDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
     {
-        if (batchState.PipelineId != owner.ActiveGenerationPipelineIdInternal)
+        if (batchState.PipelineId != lifecycle.ActiveGenerationPipelineIdInternal)
         {
             return;
         }
 
 #if UNITY_EDITOR
-        if (!owner.IsPlayingInternal)
+        if (!workflowOwner.IsPlayingInternal)
         {
             UnityEditor.EditorApplication.delayCall += () => ContinueDeferredGenerationPhases(batchState);
             return;
         }
 #endif
 
-        owner.StartRuntimeCoroutine(ContinueDeferredGenerationPhasesNextFrame(batchState));
+        lifecycle.StartRuntimeCoroutine(ContinueDeferredGenerationPhasesNextFrame(batchState));
     }
 
     public void FinishDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
     {
-        if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
+        if (workflowOwner.ShouldAbortDeferredGenerationInternal(batchState))
         {
-            owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+            workflowOwner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
             return;
         }
 
-        if (owner.IsPlayingInternal)
+        if (workflowOwner.IsPlayingInternal)
         {
-            owner.UpdateConiferOptimizationInternal(forceFullIfNoTarget: true);
+            lifecycle.UpdateTreeOptimizationInternal(forceFullIfNoTarget: true);
         }
 
-        owner.LastVegetationStreamingTargetWorldPositionInternal =
+        lifecycle.LastVegetationStreamingTargetWorldPositionInternal =
             batchState.VegetationStreamingTargetWorldPosition ??
-            owner.ResolveVegetationStreamingTargetWorldPositionInternal();
-        owner.LastCompletedGenerationPipelineIdInternal = batchState.PipelineId;
-        owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal = batchState.CenterTileCoordinate;
-        if (owner.ActiveRuntimeRequestedTileCoordinateInternal.HasValue &&
-            owner.ActiveRuntimeRequestedTileCoordinateInternal.Value == batchState.CenterTileCoordinate)
+            lifecycle.ResolveVegetationStreamingTargetWorldPositionInternal();
+        lifecycle.LastCompletedGenerationPipelineIdInternal = batchState.PipelineId;
+        lifecycle.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal = batchState.CenterTileCoordinate;
+        if (lifecycle.ActiveRuntimeRequestedTileCoordinateInternal.HasValue &&
+            lifecycle.ActiveRuntimeRequestedTileCoordinateInternal.Value == batchState.CenterTileCoordinate)
         {
-            owner.ActiveRuntimeRequestedTileCoordinateInternal = null;
+            lifecycle.ActiveRuntimeRequestedTileCoordinateInternal = null;
         }
 
-        owner.LogGenerationBatchSummaryInternal(batchState, "complete");
-        owner.TerrainPhaseLoadInProgressInternal = false;
-        owner.TryDispatchQueuedDynamicLoadInternal();
+        lifecycle.LogGenerationBatchSummaryInternal(batchState, "complete");
+        lifecycle.TerrainPhaseLoadInProgressInternal = false;
+        lifecycle.TryDispatchQueuedDynamicLoadInternal();
     }
 
     private void EnsureTerrainStageVisible(GeneratedTerrainBatchState batchState, string stageLabel)
     {
-        if (batchState.TerrainStageVisible)
+        if (!batchState.TryPromoteTerrainStageVisible())
         {
             return;
         }
 
-        owner.PromoteGeneratedTerrainBatchInternal(batchState);
-        batchState.TerrainStageVisible = true;
-        owner.LogGenerationBatchSummaryInternal(batchState, stageLabel);
+        lifecycle.PromoteGeneratedTerrainBatchInternal(batchState);
+        lifecycle.LogGenerationBatchSummaryInternal(batchState, stageLabel);
     }
 
     public void CancelActiveVegetationPopulation()
@@ -89,11 +116,11 @@ internal sealed class VegetationStreamingController
         if (activeVegetationPopulationBatchState != null)
         {
             double elapsedMilliseconds = activeVegetationPopulationStopwatch?.Elapsed.TotalMilliseconds ?? 0d;
-            owner.Reporter.InterruptAndLogPendingVegetationTileStats(activeVegetationPopulationBatchState, elapsedMilliseconds);
-            owner.DiscardPendingVegetationBuildOutputsInternal(activeVegetationPopulationBatchState);
+            reporting.Reporter.InterruptAndLogPendingVegetationTileStats(activeVegetationPopulationBatchState, elapsedMilliseconds);
+            reporting.DiscardPendingVegetationBuildOutputsInternal(activeVegetationPopulationBatchState);
         }
 
-        owner.StopRuntimeCoroutineInternal(ActiveVegetationPopulationCoroutine);
+        lifecycle.StopRuntimeCoroutineInternal(ActiveVegetationPopulationCoroutine);
         ActiveVegetationPopulationCoroutine = null;
         activeVegetationPopulationBatchState = null;
         activeVegetationPopulationStopwatch = null;
@@ -101,18 +128,18 @@ internal sealed class VegetationStreamingController
 
     public void PopulateVegetationImmediately(GeneratedTerrainBatchState batchState)
     {
-        if (!owner.PlaceTreeObjectsInternal && !owner.PlaceSurfaceObjectsInternal)
+        if (!execution.PlaceTreeObjectsInternal && !execution.PlaceSurfaceObjectsInternal)
         {
             return;
         }
 
         var totalStopwatch = Stopwatch.StartNew();
-        owner.EnsurePlayerCentricSurfaceCachesInternal(batchState, totalStopwatch);
+        execution.EnsurePlayerCentricSurfaceCachesInternal(batchState, totalStopwatch);
 
         int terrainCount = Math.Min(batchState.VegetationRefreshRequests.Count, batchState.VegetationRefreshTerrains.Count);
-        if (owner.UsesLegacyVegetationObjectsInternal())
+        if (execution.UsesLegacyVegetationObjectsInternal())
         {
-            owner.MeasureVegetationRenderPhaseInternal(() =>
+            execution.MeasureVegetationRenderPhaseInternal(() =>
             {
                 for (int i = 0; i < terrainCount; i++)
                 {
@@ -122,7 +149,7 @@ internal sealed class VegetationStreamingController
                         continue;
                     }
 
-                    owner.PopulatePlacedObjectsLegacyInternal(
+                    execution.PopulatePlacedObjectsLegacyInternal(
                         terrain,
                         batchState.VegetationRefreshRequests[i],
                         batchState.NormalizationMinHeight,
@@ -133,31 +160,31 @@ internal sealed class VegetationStreamingController
         }
 
         var queuePrepStopwatch = Stopwatch.StartNew();
-        var workItems = owner.PrepareVegetationWorkItemsInternal(batchState, totalStopwatch);
+        var workItems = execution.PrepareVegetationWorkItemsInternal(batchState, totalStopwatch);
         queuePrepStopwatch.Stop();
-        owner.RecordGenerationPhaseTimingInternal(batchState, "vegetation queue prep", queuePrepStopwatch.Elapsed);
-        owner.LogGenerationPhaseTimingInternal("vegetation queue prep", queuePrepStopwatch.Elapsed);
+        telemetry.RecordGenerationPhaseTimingInternal(batchState, "vegetation queue prep", queuePrepStopwatch.Elapsed);
+        telemetry.LogGenerationPhaseTimingInternal("vegetation queue prep", queuePrepStopwatch.Elapsed);
 
         for (int i = 0; i < workItems.Count; i++)
         {
             VegetationWorkItem workItem = workItems[i];
-            while (owner.ProcessNextVegetationWorkItemPlacementInternal(workItem, totalStopwatch))
+            while (execution.ProcessNextVegetationWorkItemPlacementInternal(workItem, totalStopwatch))
             {
             }
 
-            owner.FinalizeVegetationWorkItemInternal(workItem, totalStopwatch);
+            execution.FinalizeVegetationWorkItemInternal(workItem, totalStopwatch);
         }
 
         totalStopwatch.Stop();
-        batchState.VegetationFullSettledMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
-            owner.Reporter.FinalizeAndLogPendingVegetationTileStats(batchState, batchState.VegetationFullSettledMilliseconds);
+        batchState.MarkVegetationFullySettled(totalStopwatch.Elapsed.TotalMilliseconds);
+        reporting.Reporter.FinalizeAndLogPendingVegetationTileStats(batchState, batchState.VegetationFullSettledMilliseconds);
     }
 
     public List<VegetationWorkItem> PrepareVegetationWorkItems(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch)
     {
         var orderedWorkItems = new List<VegetationWorkItem>();
         var workItemsByBucket = new Dictionary<VegetationPriorityBucket, List<VegetationWorkItem>>();
-        batchState.VegetationStreamingTargetWorldPosition = owner.ResolveVegetationStreamingTargetWorldPositionInternal();
+        batchState.VegetationStreamingTargetWorldPosition = lifecycle.ResolveVegetationStreamingTargetWorldPositionInternal();
         batchState.VegetationClearOnlyTerrains.Clear();
         int terrainCount = Math.Min(batchState.VegetationRefreshRequests.Count, batchState.VegetationRefreshTerrains.Count);
         for (int i = 0; i < terrainCount; i++)
@@ -169,8 +196,8 @@ internal sealed class VegetationStreamingController
                 continue;
             }
 
-            Vector2Int tileCoordinate = owner.GetTileCoordinateInternal(request);
-            Transform? existingVegetationContainer = owner.FindVegetationContainerInternal(terrain.transform);
+            Vector2Int tileCoordinate = execution.GetTileCoordinateInternal(request);
+            Transform? existingVegetationContainer = execution.FindVegetationContainerInternal(terrain.transform);
             if (request.Layers.PlacedObjects == null || request.Layers.PlacedObjects.Count == 0)
             {
                 if (existingVegetationContainer != null)
@@ -181,7 +208,7 @@ internal sealed class VegetationStreamingController
                 continue;
             }
 
-            HybridVegetationBuildState? buildState = owner.BeginHybridVegetationBuildInternal(
+            HybridVegetationBuildState? buildState = execution.BeginHybridVegetationBuildInternal(
                 batchState,
                 terrain,
                 request,
@@ -193,7 +220,7 @@ internal sealed class VegetationStreamingController
             }
 
             List<PreparedVegetationPlacement> preparedPlacements =
-                owner.PrepareVegetationPlacementsForRequestInternal(batchState, totalStopwatch, terrain, request);
+                execution.PrepareVegetationPlacementsForRequestInternal(batchState, totalStopwatch, terrain, request);
             if (preparedPlacements.Count == 0)
             {
                 if (existingVegetationContainer != null)
@@ -202,7 +229,7 @@ internal sealed class VegetationStreamingController
                 }
                 else
                 {
-                    owner.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
+                    execution.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
                 }
 
                 continue;
@@ -315,7 +342,7 @@ internal sealed class VegetationStreamingController
             }
         }
 
-        owner.TryLogVegetationWorkQueueSummaryInternal(batchState, orderedWorkItems);
+        execution.TryLogVegetationWorkQueueSummaryInternal(batchState, orderedWorkItems);
         return orderedWorkItems;
     }
 
@@ -335,22 +362,22 @@ internal sealed class VegetationStreamingController
                 continue;
             }
 
-            Transform? vegetationContainer = owner.FindVegetationContainerInternal(terrain.transform);
+            Transform? vegetationContainer = execution.FindVegetationContainerInternal(terrain.transform);
             if (vegetationContainer != null)
             {
-                owner.RetireGeneratedContainerInternal(vegetationContainer);
+                execution.RetireGeneratedContainerInternal(vegetationContainer);
             }
 
-            if (owner.TryGetUnityTileCoordinateForWorldPositionInternal(terrain.transform.position, out Vector3Int tileCoordinate))
+            if (execution.TryGetUnityTileCoordinateForWorldPositionInternal(terrain.transform.position, out Vector3Int tileCoordinate))
             {
-                owner.MarkRuntimeVegetationTileSettledInternal(new Vector2Int(tileCoordinate.x, tileCoordinate.y));
+                execution.MarkRuntimeVegetationTileSettledInternal(new Vector2Int(tileCoordinate.x, tileCoordinate.y));
             }
         }
     }
 
     public void DiscardPendingVegetationBuildOutputs(GeneratedTerrainBatchState batchState)
     {
-        string buildContainerName = owner.GetVegetationBuildContainerNameInternal(batchState.PipelineId);
+        string buildContainerName = execution.GetVegetationBuildContainerNameInternal(batchState.PipelineId);
         for (int i = 0; i < batchState.VegetationRefreshTerrains.Count; i++)
         {
             GStylizedTerrain terrain = batchState.VegetationRefreshTerrains[i];
@@ -362,7 +389,7 @@ internal sealed class VegetationStreamingController
             Transform? buildContainer = terrain.transform.Find(buildContainerName);
             if (buildContainer != null)
             {
-                owner.RetireGeneratedContainerInternal(buildContainer);
+                execution.RetireGeneratedContainerInternal(buildContainer);
             }
         }
     }
@@ -376,11 +403,11 @@ internal sealed class VegetationStreamingController
 
         PreparedVegetationPlacement preparedPlacement = workItem.Placements[workItem.NextPlacementIndex];
         workItem.NextPlacementIndex++;
-        bool placementBecameVisible = owner.ProcessPreparedHybridVegetationPlacementInternal(workItem, preparedPlacement);
+        bool placementBecameVisible = execution.ProcessPreparedHybridVegetationPlacementInternal(workItem, preparedPlacement);
         if (placementBecameVisible && workItem.BuildState.BatchState != null)
         {
-            Vector2Int tileCoordinate = owner.GetTileCoordinateFromBuildRequestInternal(workItem.BuildState.Request);
-            VegetationTileStreamingStats tileStats = owner.GetOrCreateVegetationTileStatsInternal(
+            Vector2Int tileCoordinate = execution.GetTileCoordinateFromBuildRequestInternal(workItem.BuildState.Request);
+            VegetationTileStreamingStats tileStats = execution.GetOrCreateVegetationTileStatsInternal(
                 workItem.BuildState.BatchState,
                 tileCoordinate,
                 workItem.IsCenterTile);
@@ -395,9 +422,9 @@ internal sealed class VegetationStreamingController
         VegetationTileStreamingStats? tileStats = null;
         if (workItem.BuildState.BatchState != null)
         {
-            tileStats = owner.GetOrCreateVegetationTileStatsInternal(
+            tileStats = execution.GetOrCreateVegetationTileStatsInternal(
                 workItem.BuildState.BatchState,
-                owner.GetTileCoordinateFromBuildRequestInternal(workItem.BuildState.Request),
+                execution.GetTileCoordinateFromBuildRequestInternal(workItem.BuildState.Request),
                 workItem.IsCenterTile);
         }
 
@@ -406,12 +433,12 @@ internal sealed class VegetationStreamingController
             workItem.IsFinalChunkForTile ||
             workItem.BuildState.Placements.Count <= 512;
         double rendererFinalizeMilliseconds = shouldFinalizeRenderer
-            ? owner.FinalizeHybridVegetationBuildInternal(workItem.BuildState)
+            ? execution.FinalizeHybridVegetationBuildInternal(workItem.BuildState)
             : 0d;
         bool vegetationBecameVisible = false;
         if (workItem.IsFinalChunkForTile)
         {
-            vegetationBecameVisible = owner.FinalizeVegetationBuildOutputInternal(workItem.BuildState);
+            vegetationBecameVisible = execution.FinalizeVegetationBuildOutputInternal(workItem.BuildState);
         }
 
         if (!vegetationBecameVisible &&
@@ -422,7 +449,7 @@ internal sealed class VegetationStreamingController
             vegetationBecameVisible = true;
         }
 
-        owner.RecordPlacementPhaseTimingInternal(
+        execution.RecordPlacementPhaseTimingInternal(
             workItem.BuildState.BatchState,
             tileStats,
             rendererFinalizeMilliseconds,
@@ -452,8 +479,8 @@ internal sealed class VegetationStreamingController
 
         if (workItem.BuildState.BatchState != null)
         {
-            Vector2Int tileCoordinate = owner.GetTileCoordinateFromBuildRequestInternal(workItem.BuildState.Request);
-            VegetationTileStreamingStats completedTileStats = tileStats ?? owner.GetOrCreateVegetationTileStatsInternal(
+            Vector2Int tileCoordinate = execution.GetTileCoordinateFromBuildRequestInternal(workItem.BuildState.Request);
+            VegetationTileStreamingStats completedTileStats = tileStats ?? execution.GetOrCreateVegetationTileStatsInternal(
                 workItem.BuildState.BatchState,
                 tileCoordinate,
                 workItem.IsCenterTile);
@@ -464,7 +491,7 @@ internal sealed class VegetationStreamingController
             TileLoaderInstancedVegetationRenderer? renderer = workItem.BuildState.VegetationContainer != null
                 ? workItem.BuildState.VegetationContainer.GetComponent<TileLoaderInstancedVegetationRenderer>()
                 : null;
-            owner.TryLogVegetationWorkItemCompletionInternal(
+            execution.TryLogVegetationWorkItemCompletionInternal(
                 workItem,
                 completedTileStats,
                 completedWorkItemCount,
@@ -474,8 +501,8 @@ internal sealed class VegetationStreamingController
                 renderer?.LastPrototypeInitializationMilliseconds ?? 0d);
             if (completedWorkItemCount >= completedTileStats.QueuedWorkItemCount)
             {
-                owner.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
-                owner.TryLogSettledVegetationTileInternal(tileCoordinate, completedTileStats);
+                execution.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
+                execution.TryLogSettledVegetationTileInternal(tileCoordinate, completedTileStats);
             }
         }
 
@@ -486,14 +513,16 @@ internal sealed class VegetationStreamingController
             return;
         }
 
-        workItem.BuildState.BatchState.VegetationCenterReadyMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
-        owner.LogCenterTileVegetationReadyInternal(workItem.BuildState.BatchState.VegetationCenterReadyMilliseconds);
+        if (workItem.BuildState.BatchState.TryMarkVegetationCenterReady(totalStopwatch.Elapsed.TotalMilliseconds))
+        {
+            execution.LogCenterTileVegetationReadyInternal(workItem.BuildState.BatchState.VegetationCenterReadyMilliseconds);
+        }
     }
 
     private IEnumerator ContinueDeferredGenerationPhasesNextFrame(GeneratedTerrainBatchState batchState)
     {
         yield return null;
-        if (!owner.IsPlayingInternal)
+        if (!workflowOwner.IsPlayingInternal)
         {
             ContinueDeferredGenerationPhases(batchState);
             yield break;
@@ -504,123 +533,198 @@ internal sealed class VegetationStreamingController
 
     private void ContinueDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
     {
-        if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
-        {
-            owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
-            return;
-        }
-
-        switch (batchState.NextDeferredPhase)
-        {
-            case DeferredGenerationPhase.RiverWater:
-                batchState.NextDeferredPhase = DeferredGenerationPhase.DebugSplines;
-                owner.MeasureRiverWaterPhaseInternal(
-                    batchState,
-                    () =>
-                    {
-                        owner.ClearGeneratedRiverOutputsInternal(batchState.RiverRefreshTerrains);
-                        owner.PopulateRiverWaterForBatchInternal(batchState);
-                    });
-                break;
-            case DeferredGenerationPhase.DebugSplines:
-                batchState.NextDeferredPhase = DeferredGenerationPhase.Vegetation;
-                owner.MeasureRiverSplinePhaseInternal(
-                    batchState,
-                    () => owner.PopulateRiverDebugSplinesForBatchInternal(batchState));
-                break;
-            case DeferredGenerationPhase.Vegetation:
-                EnsureTerrainStageVisible(batchState, "terrain-complete");
-                batchState.NextDeferredPhase = DeferredGenerationPhase.Completed;
-                if (owner.ShouldSpreadVegetationInstancingAcrossFramesInternal(batchState))
-                {
-                    activeVegetationPopulationBatchState = batchState;
-                    activeVegetationPopulationStopwatch = Stopwatch.StartNew();
-                    ActiveVegetationPopulationCoroutine = owner.StartRuntimeCoroutine(PopulateVegetationOverMultipleFrames(batchState));
-                    return;
-                }
-
-                owner.MeasureVegetationPlacementPhaseInternal(
-                    batchState,
-                    () =>
-                    {
-                        PopulateVegetationImmediately(batchState);
-                        FinalizeVegetationClearOnlyTerrains(batchState);
-                    });
-                FinishDeferredGenerationPhases(batchState);
-                return;
-            default:
-                return;
-        }
-
-        if (batchState.NextDeferredPhase != DeferredGenerationPhase.Completed)
-        {
-            ScheduleDeferredGenerationPhases(batchState);
-            return;
-        }
-
-        FinishDeferredGenerationPhases(batchState);
+        HandleDeferredWorkflowResult(batchState, deferredWorkflow.ExecuteImmediate(batchState));
     }
 
     private IEnumerator ContinueDeferredGenerationPhasesOverMultipleFrames(GeneratedTerrainBatchState batchState)
     {
-        if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
-        {
-            owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
-            yield break;
-        }
+        yield return deferredWorkflow.ExecuteOverMultipleFrames(batchState);
+        HandleDeferredWorkflowResult(batchState, deferredWorkflow.LastResult);
+    }
 
-        if (batchState.NextDeferredPhase == DeferredGenerationPhase.RiverWater)
-        {
-            batchState.NextDeferredPhase = DeferredGenerationPhase.DebugSplines;
-            yield return PopulateRiverWaterOverMultipleFrames(batchState);
-            if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
-            {
-                owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
-                yield break;
-            }
-        }
-
-        if (batchState.NextDeferredPhase == DeferredGenerationPhase.DebugSplines)
-        {
-            batchState.NextDeferredPhase = DeferredGenerationPhase.Vegetation;
-            if (!owner.IsPlayingInternal)
-            {
-                yield return PopulateRiverDebugSplinesOverMultipleFrames(batchState);
-            }
-            if (owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState))
-            {
-                owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
-                yield break;
-            }
-        }
-
-        if (batchState.NextDeferredPhase != DeferredGenerationPhase.Vegetation)
-        {
-            FinishDeferredGenerationPhases(batchState);
-            yield break;
-        }
-
-        EnsureTerrainStageVisible(batchState, "terrain-complete");
-        batchState.NextDeferredPhase = DeferredGenerationPhase.Completed;
-        if (owner.ShouldSpreadVegetationInstancingAcrossFramesInternal(batchState))
+    private DeferredWorkflowAdvanceResult ExecuteVegetationDeferredPhase(GeneratedTerrainBatchState batchState)
+    {
+        if (execution.ShouldSpreadVegetationInstancingAcrossFramesInternal(batchState))
         {
             activeVegetationPopulationBatchState = batchState;
             activeVegetationPopulationStopwatch = Stopwatch.StartNew();
-            ActiveVegetationPopulationCoroutine = owner.StartRuntimeCoroutine(PopulateVegetationOverMultipleFrames(batchState));
-            yield break;
+            ActiveVegetationPopulationCoroutine = lifecycle.StartRuntimeCoroutine(PopulateVegetationOverMultipleFrames(batchState));
+            return DeferredWorkflowAdvanceResult.StartedAsyncPhase;
         }
 
-        owner.MeasureVegetationPlacementPhaseInternal(
+        execution.MeasureVegetationPlacementPhaseInternal(
             batchState,
             () =>
             {
                 PopulateVegetationImmediately(batchState);
                 FinalizeVegetationClearOnlyTerrains(batchState);
             });
-        FinishDeferredGenerationPhases(batchState);
+        return DeferredWorkflowAdvanceResult.Completed;
     }
 
-    private IEnumerator PopulateRiverWaterOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    private void HandleDeferredWorkflowResult(GeneratedTerrainBatchState batchState, DeferredWorkflowAdvanceResult result)
+    {
+        switch (result)
+        {
+            case DeferredWorkflowAdvanceResult.ScheduleNextPhase:
+                ScheduleDeferredGenerationPhases(batchState);
+                return;
+            case DeferredWorkflowAdvanceResult.StartedAsyncPhase:
+                return;
+            case DeferredWorkflowAdvanceResult.Aborted:
+                workflowOwner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+                return;
+            default:
+                FinishDeferredGenerationPhases(batchState);
+                return;
+        }
+    }
+
+    private IEnumerator PopulateVegetationOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    {
+        bool completed = false;
+        var totalStopwatch = Stopwatch.StartNew();
+        try
+        {
+            yield return execution.EnsurePlayerCentricSurfaceCachesOverMultipleFramesInternal(batchState, totalStopwatch);
+            var queuePrepStopwatch = Stopwatch.StartNew();
+            var workItems = execution.PrepareVegetationWorkItemsInternal(batchState, totalStopwatch);
+            queuePrepStopwatch.Stop();
+            telemetry.RecordGenerationPhaseTimingInternal(batchState, "vegetation queue prep", queuePrepStopwatch.Elapsed);
+            telemetry.LogGenerationPhaseTimingInternal("vegetation queue prep", queuePrepStopwatch.Elapsed);
+
+            double frameBudgetMilliseconds = budget.ResolveRuntimePhaseBudgetMsInternal(budget.VegetationPlacementBudgetMsPerFrameInternal);
+            var frameStopwatch = Stopwatch.StartNew();
+            budget.RestartRuntimeChunkStopwatch(frameStopwatch);
+
+            for (int workItemIndex = 0; workItemIndex < workItems.Count; workItemIndex++)
+            {
+                if (batchState.PipelineId != lifecycle.ActiveGenerationPipelineIdInternal)
+                {
+                    yield break;
+                }
+
+                VegetationWorkItem workItem = workItems[workItemIndex];
+                while (execution.ProcessNextVegetationWorkItemPlacementInternal(workItem, totalStopwatch))
+                {
+                    if (!budget.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds))
+                    {
+                        continue;
+                    }
+
+                    budget.CommitRuntimeChunk(frameStopwatch);
+                    yield return null;
+                    budget.RestartRuntimeChunkStopwatch(frameStopwatch);
+                    if (batchState.PipelineId != lifecycle.ActiveGenerationPipelineIdInternal)
+                    {
+                        yield break;
+                    }
+                }
+
+                execution.FinalizeVegetationWorkItemInternal(workItem, totalStopwatch);
+                if (!budget.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds))
+                {
+                    continue;
+                }
+
+                budget.CommitRuntimeChunk(frameStopwatch);
+                yield return null;
+                budget.RestartRuntimeChunkStopwatch(frameStopwatch);
+            }
+
+            totalStopwatch.Stop();
+            batchState.MarkVegetationFullySettled(totalStopwatch.Elapsed.TotalMilliseconds);
+            FinalizeVegetationClearOnlyTerrains(batchState);
+            reporting.Reporter.FinalizeAndLogPendingVegetationTileStats(batchState, batchState.VegetationFullSettledMilliseconds);
+            completed = true;
+        }
+        finally
+        {
+            if (activeVegetationPopulationBatchState == batchState)
+            {
+                activeVegetationPopulationBatchState = null;
+                activeVegetationPopulationStopwatch = null;
+            }
+
+            ActiveVegetationPopulationCoroutine = null;
+            if (completed && batchState.PipelineId == lifecycle.ActiveGenerationPipelineIdInternal)
+            {
+                telemetry.RecordGenerationPhaseTimingInternal(batchState, "vegetation placement (spread)", totalStopwatch.Elapsed);
+                telemetry.LogGenerationPhaseTimingInternal("vegetation placement (spread)", totalStopwatch.Elapsed);
+                FinishDeferredGenerationPhases(batchState);
+            }
+            else if (!completed)
+            {
+                DiscardPendingVegetationBuildOutputs(batchState);
+                workflowOwner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+            }
+        }
+    }
+
+    private static int ResolveVegetationWorkItemChunkSize(VegetationPriorityBucket bucket)
+    {
+        return bucket switch
+        {
+            VegetationPriorityBucket.CenterCanopyAndLarge => 32,
+            VegetationPriorityBucket.OuterCanopyAndLarge => 48,
+            VegetationPriorityBucket.CenterClutterAndGround => 192,
+            VegetationPriorityBucket.OuterClutter => 192,
+            VegetationPriorityBucket.OuterGroundAndDebris => 192,
+            _ => 192,
+        };
+    }
+
+    private static void IncrementCount(IDictionary<string, int> counts, string key)
+    {
+        if (counts.TryGetValue(key, out int existing))
+        {
+            counts[key] = existing + 1;
+            return;
+        }
+
+        counts[key] = 1;
+    }
+
+    private static void AddCount(IDictionary<string, int> counts, string key, int amount)
+    {
+        if (counts.TryGetValue(key, out int existing))
+        {
+            counts[key] = existing + amount;
+            return;
+        }
+
+        counts[key] = amount;
+    }
+}
+
+internal sealed class VegetationStreamingRiverPhaseProcessor
+{
+    private readonly IVegetationStreamingRiverPhaseOwner owner;
+
+    public VegetationStreamingRiverPhaseProcessor(IVegetationStreamingRiverPhaseOwner owner)
+    {
+        this.owner = owner;
+    }
+
+    public void ExecuteRiverWaterPhase(GeneratedTerrainBatchState batchState)
+    {
+        owner.MeasureRiverWaterPhaseInternal(
+            batchState,
+            () =>
+            {
+                owner.ClearGeneratedRiverOutputsInternal(batchState.RiverRefreshTerrains);
+                owner.PopulateRiverWaterForBatchInternal(batchState);
+            });
+    }
+
+    public void ExecuteRiverSplinePhase(GeneratedTerrainBatchState batchState)
+    {
+        owner.MeasureRiverSplinePhaseInternal(
+            batchState,
+            () => owner.PopulateRiverDebugSplinesForBatchInternal(batchState));
+    }
+
+    public IEnumerator PopulateRiverWaterOverMultipleFrames(GeneratedTerrainBatchState batchState)
     {
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
@@ -675,7 +779,7 @@ internal sealed class VegetationStreamingController
         owner.LogGenerationPhaseTimingInternal("river water", totalStopwatch.Elapsed);
     }
 
-    private IEnumerator PopulateRiverDebugSplinesOverMultipleFrames(GeneratedTerrainBatchState batchState)
+    public IEnumerator PopulateRiverDebugSplinesOverMultipleFrames(GeneratedTerrainBatchState batchState)
     {
         var totalStopwatch = Stopwatch.StartNew();
         var frameStopwatch = Stopwatch.StartNew();
@@ -709,120 +813,119 @@ internal sealed class VegetationStreamingController
         owner.RecordGenerationPhaseTimingInternal(batchState, "river debug splines", totalStopwatch.Elapsed);
         owner.LogGenerationPhaseTimingInternal("river debug splines", totalStopwatch.Elapsed);
     }
+}
 
-    private IEnumerator PopulateVegetationOverMultipleFrames(GeneratedTerrainBatchState batchState)
+internal enum DeferredWorkflowAdvanceResult
+{
+    ScheduleNextPhase,
+    StartedAsyncPhase,
+    Completed,
+    Aborted,
+}
+
+internal sealed class TileLoaderDeferredWorkflow
+{
+    private readonly IVegetationDeferredWorkflowOwner owner;
+    private readonly VegetationStreamingRiverPhaseProcessor riverPhases;
+    private readonly Action<GeneratedTerrainBatchState, string> ensureTerrainStageVisible;
+    private readonly Func<GeneratedTerrainBatchState, DeferredWorkflowAdvanceResult> executeVegetationPhase;
+
+    public TileLoaderDeferredWorkflow(
+        IVegetationDeferredWorkflowOwner owner,
+        VegetationStreamingRiverPhaseProcessor riverPhases,
+        Action<GeneratedTerrainBatchState, string> ensureTerrainStageVisible,
+        Func<GeneratedTerrainBatchState, DeferredWorkflowAdvanceResult> executeVegetationPhase)
     {
-        bool completed = false;
-        var totalStopwatch = Stopwatch.StartNew();
-        try
-        {
-            yield return owner.EnsurePlayerCentricSurfaceCachesOverMultipleFramesInternal(batchState, totalStopwatch);
-            var queuePrepStopwatch = Stopwatch.StartNew();
-            var workItems = owner.PrepareVegetationWorkItemsInternal(batchState, totalStopwatch);
-            queuePrepStopwatch.Stop();
-            owner.RecordGenerationPhaseTimingInternal(batchState, "vegetation queue prep", queuePrepStopwatch.Elapsed);
-            owner.LogGenerationPhaseTimingInternal("vegetation queue prep", queuePrepStopwatch.Elapsed);
-
-            double frameBudgetMilliseconds = owner.ResolveRuntimePhaseBudgetMsInternal(owner.VegetationPlacementBudgetMsPerFrameInternal);
-            var frameStopwatch = Stopwatch.StartNew();
-            owner.RestartRuntimeChunkStopwatch(frameStopwatch);
-
-            for (int workItemIndex = 0; workItemIndex < workItems.Count; workItemIndex++)
-            {
-                if (batchState.PipelineId != owner.ActiveGenerationPipelineIdInternal)
-                {
-                    yield break;
-                }
-
-                VegetationWorkItem workItem = workItems[workItemIndex];
-                while (owner.ProcessNextVegetationWorkItemPlacementInternal(workItem, totalStopwatch))
-                {
-                    if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds))
-                    {
-                        continue;
-                    }
-
-                    owner.CommitRuntimeChunk(frameStopwatch);
-                    yield return null;
-                    owner.RestartRuntimeChunkStopwatch(frameStopwatch);
-                    if (batchState.PipelineId != owner.ActiveGenerationPipelineIdInternal)
-                    {
-                        yield break;
-                    }
-                }
-
-                owner.FinalizeVegetationWorkItemInternal(workItem, totalStopwatch);
-                if (!owner.ShouldYieldAfterRuntimeChunk(frameStopwatch, (float)frameBudgetMilliseconds))
-                {
-                    continue;
-                }
-
-                owner.CommitRuntimeChunk(frameStopwatch);
-                yield return null;
-                owner.RestartRuntimeChunkStopwatch(frameStopwatch);
-            }
-
-            totalStopwatch.Stop();
-            batchState.VegetationFullSettledMilliseconds = totalStopwatch.Elapsed.TotalMilliseconds;
-            FinalizeVegetationClearOnlyTerrains(batchState);
-            owner.Reporter.FinalizeAndLogPendingVegetationTileStats(batchState, batchState.VegetationFullSettledMilliseconds);
-            completed = true;
-        }
-        finally
-        {
-            if (activeVegetationPopulationBatchState == batchState)
-            {
-                activeVegetationPopulationBatchState = null;
-                activeVegetationPopulationStopwatch = null;
-            }
-
-            ActiveVegetationPopulationCoroutine = null;
-            if (completed && batchState.PipelineId == owner.ActiveGenerationPipelineIdInternal)
-            {
-                owner.RecordGenerationPhaseTimingInternal(batchState, "vegetation placement (spread)", totalStopwatch.Elapsed);
-                owner.LogGenerationPhaseTimingInternal("vegetation placement (spread)", totalStopwatch.Elapsed);
-                FinishDeferredGenerationPhases(batchState);
-            }
-            else if (!completed)
-            {
-                DiscardPendingVegetationBuildOutputs(batchState);
-                owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
-            }
-        }
+        this.owner = owner;
+        this.riverPhases = riverPhases;
+        this.ensureTerrainStageVisible = ensureTerrainStageVisible;
+        this.executeVegetationPhase = executeVegetationPhase;
+        LastResult = DeferredWorkflowAdvanceResult.Completed;
     }
 
-    private static int ResolveVegetationWorkItemChunkSize(VegetationPriorityBucket bucket)
+    public DeferredWorkflowAdvanceResult LastResult { get; private set; }
+
+    public DeferredWorkflowAdvanceResult ExecuteImmediate(GeneratedTerrainBatchState batchState)
     {
-        return bucket switch
+        if (owner.ShouldAbortDeferredGenerationInternal(batchState))
         {
-            VegetationPriorityBucket.CenterCanopyAndLarge => 32,
-            VegetationPriorityBucket.OuterCanopyAndLarge => 48,
-            VegetationPriorityBucket.CenterClutterAndGround => 192,
-            VegetationPriorityBucket.OuterClutter => 192,
-            VegetationPriorityBucket.OuterGroundAndDebris => 192,
-            _ => 192,
+            return DeferredWorkflowAdvanceResult.Aborted;
+        }
+
+        DeferredWorkflowAdvanceResult result = batchState.NextDeferredPhase switch
+        {
+            DeferredGenerationPhase.RiverWater => ExecuteImmediateRiverWaterPhase(batchState),
+            DeferredGenerationPhase.DebugSplines => ExecuteImmediateDebugSplinePhase(batchState),
+            DeferredGenerationPhase.Vegetation => ExecuteVegetationPhase(batchState),
+            _ => DeferredWorkflowAdvanceResult.Completed,
         };
+
+        LastResult = result;
+        return result;
     }
 
-    private static void IncrementCount(IDictionary<string, int> counts, string key)
+    public IEnumerator ExecuteOverMultipleFrames(GeneratedTerrainBatchState batchState)
     {
-        if (counts.TryGetValue(key, out int existing))
+        LastResult = DeferredWorkflowAdvanceResult.Completed;
+        if (owner.ShouldAbortDeferredGenerationInternal(batchState))
         {
-            counts[key] = existing + 1;
-            return;
+            LastResult = DeferredWorkflowAdvanceResult.Aborted;
+            yield break;
         }
 
-        counts[key] = 1;
-    }
-
-    private static void AddCount(IDictionary<string, int> counts, string key, int amount)
-    {
-        if (counts.TryGetValue(key, out int existing))
+        if (batchState.IsAwaitingPhase(DeferredGenerationPhase.RiverWater))
         {
-            counts[key] = existing + amount;
-            return;
+            yield return riverPhases.PopulateRiverWaterOverMultipleFrames(batchState);
+            if (owner.ShouldAbortDeferredGenerationInternal(batchState))
+            {
+                LastResult = DeferredWorkflowAdvanceResult.Aborted;
+                yield break;
+            }
+
+            batchState.AdvanceDeferredPhase();
         }
 
-        counts[key] = amount;
+        if (batchState.IsAwaitingPhase(DeferredGenerationPhase.DebugSplines))
+        {
+            if (!owner.IsPlayingInternal)
+            {
+                yield return riverPhases.PopulateRiverDebugSplinesOverMultipleFrames(batchState);
+            }
+
+            if (owner.ShouldAbortDeferredGenerationInternal(batchState))
+            {
+                LastResult = DeferredWorkflowAdvanceResult.Aborted;
+                yield break;
+            }
+
+            batchState.AdvanceDeferredPhase();
+        }
+
+        LastResult = batchState.IsAwaitingPhase(DeferredGenerationPhase.Vegetation)
+            ? ExecuteVegetationPhase(batchState)
+            : DeferredWorkflowAdvanceResult.Completed;
     }
+
+    private DeferredWorkflowAdvanceResult ExecuteImmediateRiverWaterPhase(GeneratedTerrainBatchState batchState)
+    {
+        riverPhases.ExecuteRiverWaterPhase(batchState);
+        batchState.AdvanceDeferredPhase();
+        return DeferredWorkflowAdvanceResult.ScheduleNextPhase;
+    }
+
+    private DeferredWorkflowAdvanceResult ExecuteImmediateDebugSplinePhase(GeneratedTerrainBatchState batchState)
+    {
+        riverPhases.ExecuteRiverSplinePhase(batchState);
+        batchState.AdvanceDeferredPhase();
+        return DeferredWorkflowAdvanceResult.ScheduleNextPhase;
+    }
+
+    private DeferredWorkflowAdvanceResult ExecuteVegetationPhase(GeneratedTerrainBatchState batchState)
+    {
+        ensureTerrainStageVisible(batchState, "terrain-complete");
+        batchState.MarkDeferredWorkflowCompleted();
+        return executeVegetationPhase(batchState);
+    }
+}
+
 }

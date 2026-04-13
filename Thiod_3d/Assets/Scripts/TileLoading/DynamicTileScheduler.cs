@@ -5,6 +5,9 @@ using UnityEngine;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class DynamicTileScheduler
 {
     private Transform? cachedDynamicLoadTarget;
@@ -510,19 +513,19 @@ internal sealed class DynamicTileScheduler
             return cachedDynamicLoadTarget;
         }
 
-        if (TileLoaderConiferOptimizer.TryFindSceneTransformWithComponent("UltimateCharacterLocomotion", out Transform? ultimateLocomotionTransform))
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithComponent("UltimateCharacterLocomotion", out Transform? ultimateLocomotionTransform))
         {
             cachedDynamicLoadTarget = ultimateLocomotionTransform;
             return cachedDynamicLoadTarget;
         }
 
-        if (TileLoaderConiferOptimizer.TryFindSceneTransformWithComponent("CharacterLocomotion", out Transform? locomotionTransform))
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithComponent("CharacterLocomotion", out Transform? locomotionTransform))
         {
             cachedDynamicLoadTarget = locomotionTransform;
             return cachedDynamicLoadTarget;
         }
 
-        if (TileLoaderConiferOptimizer.TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
         {
             cachedDynamicLoadTarget = taggedPlayerTransform;
             return cachedDynamicLoadTarget;
@@ -537,4 +540,6 @@ internal sealed class DynamicTileScheduler
         cachedDynamicLoadTarget = null;
         return null;
     }
+}
+
 }

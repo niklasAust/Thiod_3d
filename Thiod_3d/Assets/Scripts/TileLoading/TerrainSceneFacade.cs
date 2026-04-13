@@ -6,6 +6,9 @@ using UnityEngine;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class TerrainSceneFacade
 {
     private readonly struct RetiredTerrainContainer
@@ -157,8 +160,7 @@ internal sealed class TerrainSceneFacade
             terrain.transform.localPosition = owner.GetTerrainLocalPositionRelativeToBatchCenterInternal(tileCoordinate, batchState.CenterTileCoordinate);
             terrain.transform.localRotation = Quaternion.identity;
             terrain.transform.localScale = Vector3.one;
-            batchState.TerrainByCoordinate[tileCoordinate] = terrain;
-            batchState.ReusedTerrainCount++;
+            batchState.RegisterReusedTerrain(tileCoordinate, terrain);
             owner.ValidateReusedTerrainPlacementInternal(batchState, terrain, tileCoordinate, "terrain root reuse");
         }
 
@@ -458,4 +460,6 @@ internal sealed class TerrainSceneFacade
             }
         }
     }
+}
+
 }

@@ -4,6 +4,9 @@ using UnityEngine;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class TileLoaderFrameBudgetCoordinator
 {
     private int frameCount = -1;
@@ -73,4 +76,6 @@ internal sealed class TileLoaderFrameBudgetCoordinator
         frameCount = currentFrameCount;
         consumedMilliseconds = 0d;
     }
+}
+
 }

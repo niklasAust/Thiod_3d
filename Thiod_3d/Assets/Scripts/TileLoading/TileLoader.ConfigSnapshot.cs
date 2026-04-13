@@ -1,376 +1,350 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using Pinwheel.Griffin;
 using UnityEngine;
+using UnityEngine.Splines;
+using WorldGen;
 
 #nullable enable
 
-internal sealed class TileLoaderConfigSnapshot
+namespace Thiod.TileLoading.Runtime
 {
-    public TileLoaderConfigSnapshot(
-        WorldSourceConfig worldSource,
-        DynamicLoadingConfig dynamicLoading,
-        TerrainOutputConfig terrain,
-        VegetationConfig vegetation,
-        RiverConfig river,
-        OptimizationConfig optimization,
-        DebugConfig debug)
+
+internal sealed class TileLoaderGenerationTelemetryPort : IGenerationTelemetryPort
+{
+    private readonly TileLoader owner;
+
+    public TileLoaderGenerationTelemetryPort(TileLoader owner)
     {
-        WorldSource = worldSource;
-        DynamicLoading = dynamicLoading;
-        Terrain = terrain;
-        Vegetation = vegetation;
-        River = river;
-        Optimization = optimization;
-        Debug = debug;
+        this.owner = owner;
     }
 
-    public WorldSourceConfig WorldSource { get; }
-    public DynamicLoadingConfig DynamicLoading { get; }
-    public TerrainOutputConfig Terrain { get; }
-    public VegetationConfig Vegetation { get; }
-    public RiverConfig River { get; }
-    public OptimizationConfig Optimization { get; }
-    public DebugConfig Debug { get; }
+    public void RecordGenerationPhaseTimingInternal(GeneratedTerrainBatchState? batchState, string phaseName, TimeSpan elapsed)
+        => owner.RecordGenerationPhaseTimingInternal(batchState, phaseName, elapsed);
+
+    public void LogGenerationPhaseTimingInternal(string phaseName, TimeSpan elapsed)
+        => owner.LogGenerationPhaseTimingInternal(phaseName, elapsed);
 }
 
-internal sealed class WorldSourceConfig
+internal sealed class TileLoaderRuntimeBudgetPort :
+    ITerrainStreamingBudgetPort,
+    IVegetationStreamingBudgetPort,
+    IPlayerCentricSurfaceBudgetPort,
+    IInstancedVegetationRuntimeBudgetOwner
 {
-    public WorldSourceConfig(
-        string worldDataFile,
-        bool loadOnEnableInEditMode,
-        bool loadOnStartInPlayMode,
-        bool useMetadataGenerationSettings,
-        int fallbackTileSize,
-        int fallbackHillSpacing,
-        float fallbackHillStrength,
-        bool invertUnityYForWorldGen)
+    private readonly TileLoader owner;
+
+    public TileLoaderRuntimeBudgetPort(TileLoader owner)
     {
-        WorldDataFile = worldDataFile;
-        LoadOnEnableInEditMode = loadOnEnableInEditMode;
-        LoadOnStartInPlayMode = loadOnStartInPlayMode;
-        UseMetadataGenerationSettings = useMetadataGenerationSettings;
-        FallbackTileSize = fallbackTileSize;
-        FallbackHillSpacing = fallbackHillSpacing;
-        FallbackHillStrength = fallbackHillStrength;
-        InvertUnityYForWorldGen = invertUnityYForWorldGen;
+        this.owner = owner;
     }
 
-    public string WorldDataFile { get; }
-    public bool LoadOnEnableInEditMode { get; }
-    public bool LoadOnStartInPlayMode { get; }
-    public bool UseMetadataGenerationSettings { get; }
-    public int FallbackTileSize { get; }
-    public int FallbackHillSpacing { get; }
-    public float FallbackHillStrength { get; }
-    public bool InvertUnityYForWorldGen { get; }
+    public float TerrainCreationBudgetMsPerFrameInternal => owner.TerrainCreationBudgetMsPerFrameInternal;
+    public float TerrainSeamBudgetMsPerFrameInternal => owner.TerrainSeamBudgetMsPerFrameInternal;
+    public float TerrainShadingBudgetMsPerFrameInternal => owner.TerrainShadingBudgetMsPerFrameInternal;
+    public float RuntimeGlobalBudgetMsPerFrameInternal => owner.RuntimeGlobalBudgetMsPerFrameInternal;
+    public float VegetationPlacementBudgetMsPerFrameInternal => owner.VegetationPlacementBudgetMsPerFrameInternal;
+    public float PlayerCentricSurfaceBuildBudgetMsPerFrameInternal => owner.PlayerCentricSurfaceBuildBudgetMsPerFrameInternal;
+    public int ActiveGenerationPipelineIdInternal => owner.ActiveGenerationPipelineIdInternal;
+
+    public float ResolveRuntimePhaseBudgetMsInternal(float localBudgetMilliseconds)
+        => owner.ResolveRuntimePhaseBudgetMsInternal(localBudgetMilliseconds);
+
+    public void RestartRuntimeChunkStopwatch(Stopwatch chunkStopwatch)
+        => owner.RestartRuntimeChunkStopwatch(chunkStopwatch);
+
+    public bool ShouldYieldAfterRuntimeChunk(Stopwatch chunkStopwatch, float localBudgetMilliseconds, double minimumBudgetMilliseconds = 0.25d)
+        => owner.ShouldYieldAfterRuntimeChunk(chunkStopwatch, localBudgetMilliseconds, minimumBudgetMilliseconds);
+
+    public void CommitRuntimeChunk(Stopwatch chunkStopwatch)
+        => owner.CommitRuntimeChunk(chunkStopwatch);
+
+    public void RegisterInstancedVegetationRendererInternal(TileLoaderInstancedVegetationRenderer renderer)
+        => owner.RegisterInstancedVegetationRendererInternal(renderer);
+
+    public void UnregisterInstancedVegetationRendererInternal(TileLoaderInstancedVegetationRenderer renderer)
+        => owner.UnregisterInstancedVegetationRendererInternal(renderer);
 }
 
-internal sealed class DynamicLoadingConfig
+internal sealed class TerrainStreamingLifecyclePortAdapter : ITerrainStreamingLifecyclePort
 {
-    public DynamicLoadingConfig(
-        bool enabled,
-        Transform? targetOverride,
-        float checkIntervalSeconds,
-        float preloadFraction,
-        float hysteresisFraction,
-        bool reuseOverlappingNeighborhoodTiles,
-        float retiredTerrainColliderGraceSeconds,
-        bool load3x3Neighborhood)
+    private readonly TileLoader owner;
+
+    public TerrainStreamingLifecyclePortAdapter(TileLoader owner)
     {
-        Enabled = enabled;
-        TargetOverride = targetOverride;
-        CheckIntervalSeconds = checkIntervalSeconds;
-        PreloadFraction = preloadFraction;
-        HysteresisFraction = hysteresisFraction;
-        ReuseOverlappingNeighborhoodTiles = reuseOverlappingNeighborhoodTiles;
-        RetiredTerrainColliderGraceSeconds = retiredTerrainColliderGraceSeconds;
-        Load3x3Neighborhood = load3x3Neighborhood;
+        this.owner = owner;
     }
 
-    public bool Enabled { get; }
-    public Transform? TargetOverride { get; }
-    public float CheckIntervalSeconds { get; }
-    public float PreloadFraction { get; }
-    public float HysteresisFraction { get; }
-    public bool ReuseOverlappingNeighborhoodTiles { get; }
-    public float RetiredTerrainColliderGraceSeconds { get; }
-    public bool Load3x3Neighborhood { get; }
+    public int BeginTerrainGenerationPipelineInternal() => owner.BeginTerrainGenerationPipelineInternal();
+    public int ActiveGenerationPipelineIdInternal => owner.ActiveGenerationPipelineIdInternal;
+    public bool IsPlayingInternal => owner.IsPlayingInternal;
+    public bool DynamicTileLoadingEnabled => owner.DynamicTileLoadingEnabled;
+    public bool TerrainPhaseLoadInProgressInternal { get => owner.TerrainPhaseLoadInProgressInternal; set => owner.TerrainPhaseLoadInProgressInternal = value; }
+    public void CancelActiveVegetationPopulationInternal() => owner.CancelActiveVegetationPopulationInternal();
+    public void ResetGeneratedRuntimeArtifactsInternal() => owner.ResetGeneratedRuntimeArtifactsInternal();
+    public void ClearGeneratedTerrainsInternal() => owner.ClearGeneratedTerrainsInternal();
+    public Coroutine StartRuntimeCoroutine(IEnumerator routine) => owner.StartRuntimeCoroutine(routine);
+    public Coroutine? ActiveTerrainLoadCoroutineInternal { get => owner.ActiveTerrainLoadCoroutineInternal; set => owner.ActiveTerrainLoadCoroutineInternal = value; }
+    public Coroutine? ActiveVegetationPopulationCoroutineInternal => owner.ActiveVegetationPopulationCoroutineInternal;
+    public Vector3Int UnityTileCoordinate => owner.UnityTileCoordinate;
+    public Vector3Int? ActiveRuntimeRequestedTileCoordinateInternal { get => owner.ActiveRuntimeRequestedTileCoordinateInternal; set => owner.ActiveRuntimeRequestedTileCoordinateInternal = value; }
+    public bool ShouldAbortRuntimeTerrainStreamingInternal(GeneratedTerrainBatchState batchState) => owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState);
+    public void ReleaseTerrainPhaseAfterAbortedBatchInternal(GeneratedTerrainBatchState batchState) => owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+    public void TryDispatchQueuedDynamicLoadInternal() => owner.TryDispatchQueuedDynamicLoadInternal();
 }
 
-internal sealed class TerrainOutputConfig
+internal sealed class TerrainStreamingBatchPortAdapter : ITerrainStreamingBatchPort
 {
-    public TerrainOutputConfig(
-        Vector3Int unityTileCoordinate,
-        string generatedTerrainName,
-        float width,
-        float length,
-        float height,
-        int gridSize)
+    private readonly TileLoader owner;
+
+    public TerrainStreamingBatchPortAdapter(TileLoader owner)
     {
-        UnityTileCoordinate = unityTileCoordinate;
-        GeneratedTerrainName = generatedTerrainName;
-        Width = width;
-        Length = length;
-        Height = height;
-        GridSize = gridSize;
+        this.owner = owner;
     }
 
-    public Vector3Int UnityTileCoordinate { get; }
-    public string GeneratedTerrainName { get; }
-    public float Width { get; }
-    public float Length { get; }
-    public float Height { get; }
-    public int GridSize { get; }
+    public GeneratedTerrainBatchState MeasureBatchWorldgenInternal(TileGenerator tileGenerator, LoadedWorldData loadedWorldData, GenerationSettings settings, int pipelineId)
+        => owner.MeasureBatchWorldgenInternal(tileGenerator, loadedWorldData, settings, pipelineId);
+
+    public bool TryReuseActiveTerrainBatchRootInternal(GeneratedTerrainBatchState batchState)
+        => owner.TryReuseActiveTerrainBatchRootInternal(batchState);
+
+    public Transform CreateGeneratedTerrainBatchRootInternal(int pipelineId, Vector3Int centerTileCoordinate)
+        => owner.CreateGeneratedTerrainBatchRootInternal(pipelineId, centerTileCoordinate);
+
+    public void FinalizeTerrainBatchStateInternal(GeneratedTerrainBatchState batchState)
+        => owner.FinalizeTerrainBatchStateInternal(batchState);
+
+    public void DestroyGeneratedTerrainContainerInternal(Transform? container)
+        => owner.DestroyGeneratedTerrainContainerInternal(container);
+
+    public void PrepareDeferredGenerationTargetsInternal(GeneratedTerrainBatchState batchState)
+        => owner.PrepareDeferredGenerationTargetsInternal(batchState);
+
+    public void ScheduleDeferredGenerationPhasesInternal(GeneratedTerrainBatchState batchState)
+        => owner.ScheduleDeferredGenerationPhasesInternal(batchState);
+
+    public string GetTerrainBatchWorldgenPhaseNameInternal() => owner.GetTerrainBatchWorldgenPhaseNameInternal();
+    public TileLoaderBatchPlanner CreateBatchPlannerInternal() => owner.CreateBatchPlannerInternal();
+    public GeneratedTerrainBatchCacheEntry? CachedTerrainBatchInternal { get => owner.CachedTerrainBatchInternal; set => owner.CachedTerrainBatchInternal = value; }
+    public Transform? ActiveGeneratedTerrainRootInternal => owner.ActiveGeneratedTerrainRootInternal;
+    public Vector3Int? ActiveLoadedUnityTileCoordinate => owner.ActiveLoadedUnityTileCoordinate;
+    public Dictionary<Vector2Int, GeneratedTerrainTileData> ActiveTerrainTileCacheInternal => owner.ActiveTerrainTileCacheInternal;
+    public string? ActiveTerrainTileCacheSignatureInternal => owner.ActiveTerrainTileCacheSignatureInternal;
 }
 
-internal sealed class VegetationConfig
+internal sealed class TerrainStreamingCreationPortAdapter : ITerrainStreamingCreationPort
 {
-    public VegetationConfig(
-        bool placeTrees,
-        bool placeSurfaceObjects,
-        VegetationLoadMode loadMode,
-        float interactionRadiusMeters,
-        float interactionHysteresisMeters,
-        string generatedVegetationContainerName,
-        float treeObjectVerticalOffset,
-        float surfaceObjectVerticalOffset,
-        bool playerCentricSurfaceVegetationEnabled,
-        float playerCentricSurfaceRadiusMeters,
-        float playerCentricSurfaceHysteresisMeters,
-        float playerCentricSurfaceCellSizeMeters,
-        float playerCentricSurfaceUpdateIntervalSeconds,
-        bool spreadPlacementAcrossFrames,
-        float placementBudgetMsPerFrame,
-        float playerCentricSurfaceBuildBudgetMsPerFrame,
-        float prototypeInitBudgetMsPerFrame,
-        bool centerTileOnlyNonTreeBudgetFirst,
-        float highDetailPlacementRadiusMeters,
-        float midDetailPlacementRadiusMeters,
-        float highDetailTerrainConformRadiusMeters,
-        float grassClusterConformSurfaceOffset)
+    private readonly TileLoader owner;
+
+    public TerrainStreamingCreationPortAdapter(TileLoader owner)
     {
-        PlaceTrees = placeTrees;
-        PlaceSurfaceObjects = placeSurfaceObjects;
-        LoadMode = loadMode;
-        InteractionRadiusMeters = interactionRadiusMeters;
-        InteractionHysteresisMeters = interactionHysteresisMeters;
-        GeneratedVegetationContainerName = generatedVegetationContainerName;
-        TreeObjectVerticalOffset = treeObjectVerticalOffset;
-        SurfaceObjectVerticalOffset = surfaceObjectVerticalOffset;
-        PlayerCentricSurfaceVegetationEnabled = playerCentricSurfaceVegetationEnabled;
-        PlayerCentricSurfaceRadiusMeters = playerCentricSurfaceRadiusMeters;
-        PlayerCentricSurfaceHysteresisMeters = playerCentricSurfaceHysteresisMeters;
-        PlayerCentricSurfaceCellSizeMeters = playerCentricSurfaceCellSizeMeters;
-        PlayerCentricSurfaceUpdateIntervalSeconds = playerCentricSurfaceUpdateIntervalSeconds;
-        SpreadPlacementAcrossFrames = spreadPlacementAcrossFrames;
-        PlacementBudgetMsPerFrame = placementBudgetMsPerFrame;
-        PlayerCentricSurfaceBuildBudgetMsPerFrame = playerCentricSurfaceBuildBudgetMsPerFrame;
-        PrototypeInitBudgetMsPerFrame = prototypeInitBudgetMsPerFrame;
-        CenterTileOnlyNonTreeBudgetFirst = centerTileOnlyNonTreeBudgetFirst;
-        HighDetailPlacementRadiusMeters = highDetailPlacementRadiusMeters;
-        MidDetailPlacementRadiusMeters = midDetailPlacementRadiusMeters;
-        HighDetailTerrainConformRadiusMeters = highDetailTerrainConformRadiusMeters;
-        GrassClusterConformSurfaceOffset = grassClusterConformSurfaceOffset;
+        this.owner = owner;
     }
 
-    public bool PlaceTrees { get; }
-    public bool PlaceSurfaceObjects { get; }
-    public VegetationLoadMode LoadMode { get; }
-    public float InteractionRadiusMeters { get; }
-    public float InteractionHysteresisMeters { get; }
-    public string GeneratedVegetationContainerName { get; }
-    public float TreeObjectVerticalOffset { get; }
-    public float SurfaceObjectVerticalOffset { get; }
-    public bool PlayerCentricSurfaceVegetationEnabled { get; }
-    public float PlayerCentricSurfaceRadiusMeters { get; }
-    public float PlayerCentricSurfaceHysteresisMeters { get; }
-    public float PlayerCentricSurfaceCellSizeMeters { get; }
-    public float PlayerCentricSurfaceUpdateIntervalSeconds { get; }
-    public bool SpreadPlacementAcrossFrames { get; }
-    public float PlacementBudgetMsPerFrame { get; }
-    public float PlayerCentricSurfaceBuildBudgetMsPerFrame { get; }
-    public float PrototypeInitBudgetMsPerFrame { get; }
-    public bool CenterTileOnlyNonTreeBudgetFirst { get; }
-    public float HighDetailPlacementRadiusMeters { get; }
-    public float MidDetailPlacementRadiusMeters { get; }
-    public float HighDetailTerrainConformRadiusMeters { get; }
-    public float GrassClusterConformSurfaceOffset { get; }
+    public void MeasureTerrainCreationPhaseInternal(GeneratedTerrainBatchState batchState, Action action) => owner.MeasureTerrainCreationPhaseInternal(batchState, action);
+    public int GetGeneratedTerrainGroupIdInternal() => owner.GetGeneratedTerrainGroupIdInternal();
+    public Vector2Int GetTileCoordinateInternal(GeneratedTerrainRequest request) => owner.GetTileCoordinateInternal(request);
+    public GStylizedTerrain CreateTerrainInternal(TileLayers layers, string terrainObjectName, Vector3 localPosition, int unityTileX, int unityTileY, double normalizationMinHeight, double normalizationMaxHeight, double localMinHeight, double localMaxHeight, double tileHilliness, int terrainGroupId, Transform parent)
+        => owner.CreateTerrainInternal(layers, terrainObjectName, localPosition, unityTileX, unityTileY, normalizationMinHeight, normalizationMaxHeight, localMinHeight, localMaxHeight, tileHilliness, terrainGroupId, parent);
+    public List<GeneratedTerrainRequest> GetTerrainCreationRequestsInPriorityOrderInternal(GeneratedTerrainBatchState batchState) => owner.GetTerrainCreationRequestsInPriorityOrderInternal(batchState);
+    public GTerrainData CreateTerrainDataForRuntimeCreationInternal(TileLayers layers, double normalizationMinHeight, double normalizationMaxHeight, double localMaxHeight, double tileHilliness)
+        => owner.CreateTerrainDataForRuntimeCreationInternal(layers, normalizationMinHeight, normalizationMaxHeight, localMaxHeight, tileHilliness);
+    public Color[] BuildTerrainHeightPixelsForRuntimeCreationInternal(double[,] heightmap, double normalizationMinHeight, double normalizationMaxHeight)
+        => owner.BuildTerrainHeightPixelsForRuntimeCreationInternal(heightmap, normalizationMinHeight, normalizationMaxHeight);
+    public void UploadTerrainHeightPixelsForRuntimeCreationInternal(GTerrainData terrainData, Color[] heightPixels)
+        => owner.UploadTerrainHeightPixelsForRuntimeCreationInternal(terrainData, heightPixels);
+    public GStylizedTerrain FinalizeRuntimeCreatedTerrainInternal(TileLayers layers, GTerrainData terrainData, string terrainObjectName, Vector3 localPosition, int unityTileX, int unityTileY, double normalizationMinHeight, double normalizationMaxHeight, double localMinHeight, double localMaxHeight, double tileHilliness, int terrainGroupId, Transform parent)
+        => owner.FinalizeRuntimeCreatedTerrainInternal(layers, terrainData, terrainObjectName, localPosition, unityTileX, unityTileY, normalizationMinHeight, normalizationMaxHeight, localMinHeight, localMaxHeight, tileHilliness, terrainGroupId, parent);
 }
 
-internal sealed class RiverConfig
+internal sealed class TerrainStreamingSeamPortAdapter : ITerrainStreamingSeamPort
 {
-    public RiverConfig(
-        float widthMultiplier,
-        float depthMultiplier,
-        float bankDepthMultiplier,
-        float centerDepthMultiplier,
-        float centerDepthMultiplierAtNinetyDegrees,
-        float centerCarveWidthMultiplier,
-        float centerCarveWidthMultiplierAtNinetyDegrees,
-        float profileMinDropMetersPerTile,
-        float profileMaxDropMetersPerTile,
-        float corridorDepressionMeters,
-        float corridorMaxSlopeMetersPerSample,
-        float corridorRadiusMultiplier,
-        int corridorMinRadiusSamples,
-        float corridorSmoothingStrength,
-        int corridorSmoothingKernelRadius,
-        int corridorSmoothingPasses,
-        float finalSmoothingStrength,
-        int finalSmoothingKernelRadius,
-        int finalSmoothingPasses,
-        float finalSmoothingRetainedDepthFraction,
-        bool createRiverWater,
-        bool createRiverDebugSplines,
-        string generatedRiverWaterContainerName,
-        string generatedRiverSplineContainerName,
-        Material? riverWaterMaterial,
-        string riverWaterMaterialAssetPath,
-        float riverWaterWidthMultiplier,
-        float riverWaterBedClearance,
-        float riverWaterMeshVerticalOffset,
-        float riverWaterMeshVerticalOffsetAtNinetyDegrees,
-        float riverWaterMinimumDownstreamDrop,
-        int riverWaterSampleStride,
-        int riverSplineSamplingStep,
-        int riverSplineAvgElements,
-        float riverWaterUvLengthScale,
-        float riverWaterUvWidthScale,
-        float riverWaterSpeedMultiplier,
-        float riverWaterMinSegmentLength,
-        int riverWaterTangentSmoothingRadius)
+    private readonly TileLoader owner;
+
+    public TerrainStreamingSeamPortAdapter(TileLoader owner)
     {
-        WidthMultiplier = widthMultiplier;
-        DepthMultiplier = depthMultiplier;
-        BankDepthMultiplier = bankDepthMultiplier;
-        CenterDepthMultiplier = centerDepthMultiplier;
-        CenterDepthMultiplierAtNinetyDegrees = centerDepthMultiplierAtNinetyDegrees;
-        CenterCarveWidthMultiplier = centerCarveWidthMultiplier;
-        CenterCarveWidthMultiplierAtNinetyDegrees = centerCarveWidthMultiplierAtNinetyDegrees;
-        ProfileMinDropMetersPerTile = profileMinDropMetersPerTile;
-        ProfileMaxDropMetersPerTile = profileMaxDropMetersPerTile;
-        CorridorDepressionMeters = corridorDepressionMeters;
-        CorridorMaxSlopeMetersPerSample = corridorMaxSlopeMetersPerSample;
-        CorridorRadiusMultiplier = corridorRadiusMultiplier;
-        CorridorMinRadiusSamples = corridorMinRadiusSamples;
-        CorridorSmoothingStrength = corridorSmoothingStrength;
-        CorridorSmoothingKernelRadius = corridorSmoothingKernelRadius;
-        CorridorSmoothingPasses = corridorSmoothingPasses;
-        FinalSmoothingStrength = finalSmoothingStrength;
-        FinalSmoothingKernelRadius = finalSmoothingKernelRadius;
-        FinalSmoothingPasses = finalSmoothingPasses;
-        FinalSmoothingRetainedDepthFraction = finalSmoothingRetainedDepthFraction;
-        CreateRiverWater = createRiverWater;
-        CreateRiverDebugSplines = createRiverDebugSplines;
-        GeneratedRiverWaterContainerName = generatedRiverWaterContainerName;
-        GeneratedRiverSplineContainerName = generatedRiverSplineContainerName;
-        RiverWaterMaterial = riverWaterMaterial;
-        RiverWaterMaterialAssetPath = riverWaterMaterialAssetPath;
-        RiverWaterWidthMultiplier = riverWaterWidthMultiplier;
-        RiverWaterBedClearance = riverWaterBedClearance;
-        RiverWaterMeshVerticalOffset = riverWaterMeshVerticalOffset;
-        RiverWaterMeshVerticalOffsetAtNinetyDegrees = riverWaterMeshVerticalOffsetAtNinetyDegrees;
-        RiverWaterMinimumDownstreamDrop = riverWaterMinimumDownstreamDrop;
-        RiverWaterSampleStride = riverWaterSampleStride;
-        RiverSplineSamplingStep = riverSplineSamplingStep;
-        RiverSplineAvgElements = riverSplineAvgElements;
-        RiverWaterUvLengthScale = riverWaterUvLengthScale;
-        RiverWaterUvWidthScale = riverWaterUvWidthScale;
-        RiverWaterSpeedMultiplier = riverWaterSpeedMultiplier;
-        RiverWaterMinSegmentLength = riverWaterMinSegmentLength;
-        RiverWaterTangentSmoothingRadius = riverWaterTangentSmoothingRadius;
+        this.owner = owner;
     }
 
-    public float WidthMultiplier { get; }
-    public float DepthMultiplier { get; }
-    public float BankDepthMultiplier { get; }
-    public float CenterDepthMultiplier { get; }
-    public float CenterDepthMultiplierAtNinetyDegrees { get; }
-    public float CenterCarveWidthMultiplier { get; }
-    public float CenterCarveWidthMultiplierAtNinetyDegrees { get; }
-    public float ProfileMinDropMetersPerTile { get; }
-    public float ProfileMaxDropMetersPerTile { get; }
-    public float CorridorDepressionMeters { get; }
-    public float CorridorMaxSlopeMetersPerSample { get; }
-    public float CorridorRadiusMultiplier { get; }
-    public int CorridorMinRadiusSamples { get; }
-    public float CorridorSmoothingStrength { get; }
-    public int CorridorSmoothingKernelRadius { get; }
-    public int CorridorSmoothingPasses { get; }
-    public float FinalSmoothingStrength { get; }
-    public int FinalSmoothingKernelRadius { get; }
-    public int FinalSmoothingPasses { get; }
-    public float FinalSmoothingRetainedDepthFraction { get; }
-    public bool CreateRiverWater { get; }
-    public bool CreateRiverDebugSplines { get; }
-    public string GeneratedRiverWaterContainerName { get; }
-    public string GeneratedRiverSplineContainerName { get; }
-    public Material? RiverWaterMaterial { get; }
-    public string RiverWaterMaterialAssetPath { get; }
-    public float RiverWaterWidthMultiplier { get; }
-    public float RiverWaterBedClearance { get; }
-    public float RiverWaterMeshVerticalOffset { get; }
-    public float RiverWaterMeshVerticalOffsetAtNinetyDegrees { get; }
-    public float RiverWaterMinimumDownstreamDrop { get; }
-    public int RiverWaterSampleStride { get; }
-    public int RiverSplineSamplingStep { get; }
-    public int RiverSplineAvgElements { get; }
-    public float RiverWaterUvLengthScale { get; }
-    public float RiverWaterUvWidthScale { get; }
-    public float RiverWaterSpeedMultiplier { get; }
-    public float RiverWaterMinSegmentLength { get; }
-    public int RiverWaterTangentSmoothingRadius { get; }
+    public void MeasureTerrainSeamsPhaseInternal(GeneratedTerrainBatchState batchState, Action action) => owner.MeasureTerrainSeamsPhaseInternal(batchState, action);
+    public void RebuildTerrainSeamsInternal(IReadOnlyList<GStylizedTerrain> terrains) => owner.RebuildTerrainSeamsInternal(terrains);
+    public void ConnectAdjacentTerrainsInternal() => owner.ConnectAdjacentTerrainsInternal();
+    public void RebuildTerrainSeamsInternal(GStylizedTerrain terrain, TileLoaderTerrainSeamMask seamMask) => owner.RebuildTerrainSeamsInternal(terrain, seamMask);
 }
 
-internal sealed class OptimizationConfig
+internal sealed class TerrainStreamingShadingPortAdapter : ITerrainStreamingShadingPort
 {
-    public OptimizationConfig(
-        bool optimizeConifersByDistance,
-        Transform? coniferOptimizationTarget,
-        float fullConiferDistance,
-        float reducedConiferDistance,
-        float lowDetailConiferDistance,
-        float culledConiferDistance,
-        float coniferOptimizationInterval,
-        bool disableDistantConiferColliders,
-        bool disableDistantConiferShadows,
-        bool disableDistantConiferDecals)
+    private readonly TileLoader owner;
+
+    public TerrainStreamingShadingPortAdapter(TileLoader owner)
     {
-        OptimizeConifersByDistance = optimizeConifersByDistance;
-        ConiferOptimizationTarget = coniferOptimizationTarget;
-        FullConiferDistance = fullConiferDistance;
-        ReducedConiferDistance = reducedConiferDistance;
-        LowDetailConiferDistance = lowDetailConiferDistance;
-        CulledConiferDistance = culledConiferDistance;
-        ConiferOptimizationInterval = coniferOptimizationInterval;
-        DisableDistantConiferColliders = disableDistantConiferColliders;
-        DisableDistantConiferShadows = disableDistantConiferShadows;
-        DisableDistantConiferDecals = disableDistantConiferDecals;
+        this.owner = owner;
     }
 
-    public bool OptimizeConifersByDistance { get; }
-    public Transform? ConiferOptimizationTarget { get; }
-    public float FullConiferDistance { get; }
-    public float ReducedConiferDistance { get; }
-    public float LowDetailConiferDistance { get; }
-    public float CulledConiferDistance { get; }
-    public float ConiferOptimizationInterval { get; }
-    public bool DisableDistantConiferColliders { get; }
-    public bool DisableDistantConiferShadows { get; }
-    public bool DisableDistantConiferDecals { get; }
+    public void MeasureTerrainShadingPhaseInternal(GeneratedTerrainBatchState batchState, Action action) => owner.MeasureTerrainShadingPhaseInternal(batchState, action);
+    public IReadOnlyList<GStylizedTerrain> GetTerrainsForStreamingShadingInternal(GeneratedTerrainBatchState batchState) => owner.GetTerrainsForStreamingShadingInternal(batchState);
+    public void ApplyTerrainShadingInternal(IReadOnlyList<GStylizedTerrain> terrains) => owner.ApplyTerrainShadingInternal(terrains);
 }
 
-internal sealed class DebugConfig
+internal sealed class VegetationStreamingControllerOwner :
+    IVegetationDeferredWorkflowOwner,
+    IVegetationStreamingRiverPhaseOwner,
+    IVegetationStreamingLifecyclePort,
+    IVegetationStreamingReportingPort,
+    IVegetationStreamingExecutionPort
 {
-    public DebugConfig(
-        bool logHeightStats,
-        bool logGenerationPhaseTimings,
-        bool logVegetationPlacementWorkItems)
+    private readonly TileLoader owner;
+
+    public VegetationStreamingControllerOwner(TileLoader owner)
     {
-        LogHeightStats = logHeightStats;
-        LogGenerationPhaseTimings = logGenerationPhaseTimings;
-        LogVegetationPlacementWorkItems = logVegetationPlacementWorkItems;
+        this.owner = owner;
     }
 
-    public bool LogHeightStats { get; }
-    public bool LogGenerationPhaseTimings { get; }
-    public bool LogVegetationPlacementWorkItems { get; }
+    public int ActiveGenerationPipelineIdInternal => owner.ActiveGenerationPipelineIdInternal;
+    public bool IsPlayingInternal => owner.IsPlayingInternal;
+    public Coroutine StartRuntimeCoroutine(IEnumerator routine) => owner.StartRuntimeCoroutine(routine);
+    public bool ShouldAbortDeferredGenerationInternal(GeneratedTerrainBatchState batchState) => owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState);
+    public bool ShouldAbortRuntimeTerrainStreamingInternal(GeneratedTerrainBatchState batchState) => owner.ShouldAbortRuntimeTerrainStreamingInternal(batchState);
+    public void ReleaseTerrainPhaseAfterAbortedBatchInternal(GeneratedTerrainBatchState batchState) => owner.ReleaseTerrainPhaseAfterAbortedBatchInternal(batchState);
+    public void UpdateTreeOptimizationInternal(bool forceFullIfNoTarget = false) => owner.UpdateTreeOptimizationInternal(forceFullIfNoTarget);
+    public Vector3? LastVegetationStreamingTargetWorldPositionInternal { get => owner.LastVegetationStreamingTargetWorldPositionInternal; set => owner.LastVegetationStreamingTargetWorldPositionInternal = value; }
+    public Vector3? ResolveVegetationStreamingTargetWorldPositionInternal() => owner.ResolveVegetationStreamingTargetWorldPositionInternal();
+    public int LastCompletedGenerationPipelineIdInternal { get => owner.LastCompletedGenerationPipelineIdInternal; set => owner.LastCompletedGenerationPipelineIdInternal = value; }
+    public Vector3Int? LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal { get => owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal; set => owner.LastCompletedRuntimeNeighborhoodCenterTileCoordinateInternal = value; }
+    public Vector3Int? ActiveRuntimeRequestedTileCoordinateInternal { get => owner.ActiveRuntimeRequestedTileCoordinateInternal; set => owner.ActiveRuntimeRequestedTileCoordinateInternal = value; }
+    public void LogGenerationBatchSummaryInternal(GeneratedTerrainBatchState batchState, string stage) => owner.LogGenerationBatchSummaryInternal(batchState, stage);
+    public bool TerrainPhaseLoadInProgressInternal { get => owner.TerrainPhaseLoadInProgressInternal; set => owner.TerrainPhaseLoadInProgressInternal = value; }
+    public void TryDispatchQueuedDynamicLoadInternal() => owner.TryDispatchQueuedDynamicLoadInternal();
+    public void PromoteGeneratedTerrainBatchInternal(GeneratedTerrainBatchState batchState) => owner.PromoteGeneratedTerrainBatchInternal(batchState);
+    public GenerationReporter Reporter => owner.Reporter;
+    public void DiscardPendingVegetationBuildOutputsInternal(GeneratedTerrainBatchState batchState) => owner.DiscardPendingVegetationBuildOutputsInternal(batchState);
+    public void StopRuntimeCoroutineInternal(Coroutine? routine) => owner.StopRuntimeCoroutineInternal(routine);
+    public bool PlaceTreeObjectsInternal => owner.PlaceTreeObjectsInternal;
+    public bool PlaceSurfaceObjectsInternal => owner.PlaceSurfaceObjectsInternal;
+    public void EnsurePlayerCentricSurfaceCachesInternal(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch) => owner.EnsurePlayerCentricSurfaceCachesInternal(batchState, totalStopwatch);
+    public bool UsesLegacyVegetationObjectsInternal() => owner.UsesLegacyVegetationObjectsInternal();
+    public void MeasureVegetationRenderPhaseInternal(Action action) => owner.MeasureVegetationRenderPhaseInternal(action);
+    public void PopulatePlacedObjectsLegacyInternal(GStylizedTerrain terrain, GeneratedTerrainRequest request, double normalizationMinHeight, double normalizationMaxHeight) => owner.PopulatePlacedObjectsLegacyInternal(terrain, request, normalizationMinHeight, normalizationMaxHeight);
+    public List<VegetationWorkItem> PrepareVegetationWorkItemsInternal(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch) => owner.PrepareVegetationWorkItemsInternal(batchState, totalStopwatch);
+    public void RecordGenerationPhaseTimingInternal(GeneratedTerrainBatchState? batchState, string phaseName, TimeSpan elapsed) => owner.RecordGenerationPhaseTimingInternal(batchState, phaseName, elapsed);
+    public void LogGenerationPhaseTimingInternal(string phaseName, TimeSpan elapsed) => owner.LogGenerationPhaseTimingInternal(phaseName, elapsed);
+    public HybridVegetationBuildState? BeginHybridVegetationBuildInternal(GeneratedTerrainBatchState? batchState, GStylizedTerrain terrain, GeneratedTerrainRequest request, double normalizationMinHeight, double normalizationMaxHeight) => owner.BeginHybridVegetationBuildInternal(batchState, terrain, request, normalizationMinHeight, normalizationMaxHeight);
+    public Transform? FindVegetationContainerInternal(Transform terrainTransform) => owner.FindVegetationContainerInternal(terrainTransform);
+    public void MarkRuntimeVegetationTileSettledInternal(Vector2Int tileCoordinate) => owner.MarkRuntimeVegetationTileSettledInternal(tileCoordinate);
+    public void TryLogVegetationWorkQueueSummaryInternal(GeneratedTerrainBatchState batchState, IReadOnlyList<VegetationWorkItem> workItems) => owner.TryLogVegetationWorkQueueSummaryInternal(batchState, workItems);
+    public void RetireGeneratedContainerInternal(Transform container) => owner.RetireGeneratedContainerInternal(container);
+    public bool TryGetUnityTileCoordinateForWorldPositionInternal(Vector3 worldPosition, out Vector3Int tileCoordinate) => owner.TryGetUnityTileCoordinateForWorldPositionInternal(worldPosition, out tileCoordinate);
+    public string GetVegetationBuildContainerNameInternal(int pipelineId) => owner.GetVegetationBuildContainerNameInternal(pipelineId);
+    public bool ProcessPreparedHybridVegetationPlacementInternal(VegetationWorkItem workItem, PreparedVegetationPlacement preparedPlacement) => owner.ProcessPreparedHybridVegetationPlacementInternal(workItem, preparedPlacement);
+    public Vector2Int GetTileCoordinateFromBuildRequestInternal(GeneratedTerrainRequest request) => owner.GetTileCoordinateFromBuildRequestInternal(request);
+    public VegetationTileStreamingStats GetOrCreateVegetationTileStatsInternal(GeneratedTerrainBatchState batchState, Vector2Int tileCoordinate, bool isCenterTile) => owner.GetOrCreateVegetationTileStatsInternal(batchState, tileCoordinate, isCenterTile);
+    public double FinalizeHybridVegetationBuildInternal(HybridVegetationBuildState buildState) => owner.FinalizeHybridVegetationBuildInternal(buildState);
+    public bool FinalizeVegetationBuildOutputInternal(HybridVegetationBuildState buildState) => owner.FinalizeVegetationBuildOutputInternal(buildState);
+    public void RecordPlacementPhaseTimingInternal(GeneratedTerrainBatchState? batchState, VegetationTileStreamingStats? tileStats, double elapsedMilliseconds, VegetationPlacementPhase placementPhase, VegetationWorkItem? workItem = null) => owner.RecordPlacementPhaseTimingInternal(batchState, tileStats, elapsedMilliseconds, placementPhase, workItem);
+    public void TryLogVegetationWorkItemCompletionInternal(VegetationWorkItem workItem, VegetationTileStreamingStats? tileStats, int completedWorkItemCount, int visibleInstancedPlacementCount, bool rendererFinalizeDeferred, bool rendererReady, double rendererPrototypeInitMilliseconds) => owner.TryLogVegetationWorkItemCompletionInternal(workItem, tileStats, completedWorkItemCount, visibleInstancedPlacementCount, rendererFinalizeDeferred, rendererReady, rendererPrototypeInitMilliseconds);
+    public void TryLogSettledVegetationTileInternal(Vector2Int tileCoordinate, VegetationTileStreamingStats tileStats) => owner.TryLogSettledVegetationTileInternal(tileCoordinate, tileStats);
+    public void LogCenterTileVegetationReadyInternal(double elapsedMilliseconds) => owner.LogCenterTileVegetationReadyInternal(elapsedMilliseconds);
+    public float ResolveRuntimePhaseBudgetMsInternal(float localBudgetMilliseconds) => owner.ResolveRuntimePhaseBudgetMsInternal(localBudgetMilliseconds);
+    public float RuntimeGlobalBudgetMsPerFrameInternal => owner.RuntimeGlobalBudgetMsPerFrameInternal;
+    public float VegetationPlacementBudgetMsPerFrameInternal => owner.VegetationPlacementBudgetMsPerFrameInternal;
+    public bool ProcessNextVegetationWorkItemPlacementInternal(VegetationWorkItem workItem, Stopwatch totalStopwatch) => owner.ProcessNextVegetationWorkItemPlacementInternal(workItem, totalStopwatch);
+    public void FinalizeVegetationWorkItemInternal(VegetationWorkItem workItem, Stopwatch totalStopwatch) => owner.FinalizeVegetationWorkItemInternal(workItem, totalStopwatch);
+    public bool ShouldSpreadVegetationInstancingAcrossFramesInternal(GeneratedTerrainBatchState batchState) => owner.ShouldSpreadVegetationInstancingAcrossFramesInternal(batchState);
+    public IEnumerator EnsurePlayerCentricSurfaceCachesOverMultipleFramesInternal(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch) => owner.EnsurePlayerCentricSurfaceCachesOverMultipleFramesInternal(batchState, totalStopwatch);
+    public void RestartRuntimeChunkStopwatch(Stopwatch chunkStopwatch) => owner.RestartRuntimeChunkStopwatch(chunkStopwatch);
+    public bool ShouldYieldAfterRuntimeChunk(Stopwatch chunkStopwatch, float localBudgetMilliseconds, double minimumBudgetMilliseconds = 0.25d) => owner.ShouldYieldAfterRuntimeChunk(chunkStopwatch, localBudgetMilliseconds, minimumBudgetMilliseconds);
+    public void CommitRuntimeChunk(Stopwatch chunkStopwatch) => owner.CommitRuntimeChunk(chunkStopwatch);
+    public void MeasureRiverWaterPhaseInternal(GeneratedTerrainBatchState batchState, Action action) => owner.MeasureRiverWaterPhaseInternal(batchState, action);
+    public void ClearGeneratedRiverOutputsInternal(IReadOnlyList<GStylizedTerrain> terrains) => owner.ClearGeneratedRiverOutputsInternal(terrains);
+    public void PopulateRiverWaterForBatchInternal(GeneratedTerrainBatchState batchState) => owner.PopulateRiverWaterForBatchInternal(batchState);
+    public int GetRiverWaterPathCountInternal(GeneratedTerrainRequest request, GStylizedTerrain terrain) => owner.GetRiverWaterPathCountInternal(request, terrain);
+    public bool PopulateRiverWaterForPathInternal(GeneratedTerrainRequest request, GStylizedTerrain terrain, int riverPathIndex, double normalizationMinHeight, double normalizationMaxHeight, Dictionary<string, Spline> riverSplineCache, IDictionary<string, RiverWaterSeamCrossSection> riverWaterSeams) => owner.PopulateRiverWaterForPathInternal(request, terrain, riverPathIndex, normalizationMinHeight, normalizationMaxHeight, riverSplineCache, riverWaterSeams);
+    public void MeasureRiverSplinePhaseInternal(GeneratedTerrainBatchState batchState, Action action) => owner.MeasureRiverSplinePhaseInternal(batchState, action);
+    public void PopulateRiverDebugSplinesForBatchInternal(GeneratedTerrainBatchState batchState) => owner.PopulateRiverDebugSplinesForBatchInternal(batchState);
+    public bool PopulateRiverDebugSplinesForTerrainInternal(GeneratedTerrainRequest request, GStylizedTerrain terrain, double normalizationMinHeight, double normalizationMaxHeight, Dictionary<string, Spline> riverSplineCache) => owner.PopulateRiverDebugSplinesForTerrainInternal(request, terrain, normalizationMinHeight, normalizationMaxHeight, riverSplineCache);
+    public void MeasureVegetationPlacementPhaseInternal(GeneratedTerrainBatchState batchState, Action action) => owner.MeasureVegetationPlacementPhaseInternal(batchState, action);
+    public List<PreparedVegetationPlacement> PrepareVegetationPlacementsForRequestInternal(GeneratedTerrainBatchState batchState, Stopwatch totalStopwatch, GStylizedTerrain terrain, GeneratedTerrainRequest request) => owner.PrepareVegetationPlacementsForRequestInternal(batchState, totalStopwatch, terrain, request);
+    public Vector2Int GetTileCoordinateInternal(GeneratedTerrainRequest request) => owner.GetTileCoordinateInternal(request);
+}
+
+internal sealed class PlayerCentricSurfaceSettingsPortAdapter : IPlayerCentricSurfaceSettingsPort
+{
+    private readonly TileLoader owner;
+
+    public PlayerCentricSurfaceSettingsPortAdapter(TileLoader owner)
+    {
+        this.owner = owner;
+    }
+
+    public bool IsPlayingInternal => owner.IsPlayingInternal;
+    public bool PlayerCentricSurfaceVegetationEnabledInternal => owner.PlayerCentricSurfaceVegetationEnabledInternal;
+    public bool PlaceSurfaceObjectsInternal => owner.PlaceSurfaceObjectsInternal;
+    public float PlayerCentricSurfaceUpdateIntervalSecondsInternal => owner.PlayerCentricSurfaceUpdateIntervalSecondsInternal;
+    public Vector3? ResolveVegetationStreamingTargetWorldPositionInternal() => owner.ResolveVegetationStreamingTargetWorldPositionInternal();
+    public float PlayerCentricSurfaceRadiusMetersInternal => owner.PlayerCentricSurfaceRadiusMetersInternal;
+    public float PlayerCentricSurfaceHysteresisMetersInternal => owner.PlayerCentricSurfaceHysteresisMetersInternal;
+    public float PlayerCentricSurfaceCellSizeMetersInternal => owner.PlayerCentricSurfaceCellSizeMetersInternal;
+    public int PlayerCentricSurfaceCacheVersionInternal => owner.PlayerCentricSurfaceCacheVersionInternal;
+}
+
+internal sealed class PlayerCentricSurfaceGeometryPortAdapter : IPlayerCentricSurfaceGeometryPort
+{
+    private readonly TileLoader owner;
+
+    public PlayerCentricSurfaceGeometryPortAdapter(TileLoader owner)
+    {
+        this.owner = owner;
+    }
+
+    public Vector2Int GetTileCoordinateInternal(GeneratedTerrainRequest request) => owner.GetTileCoordinateInternal(request);
+    public bool TryBuildPreparedPlacementGeometryInternal(GeneratedTerrainBatchState batchState, VegetationTileStreamingStats? tileStats, GStylizedTerrain terrain, GeneratedTerrainRequest request, TileObjectPlacement placement, bool isTreePlacement, bool enforceCurrentStreamingDistance, out PreparedPlacementGeometry geometry)
+        => owner.TryBuildPreparedPlacementGeometryInternal(batchState, tileStats, terrain, request, placement, isTreePlacement, enforceCurrentStreamingDistance, out geometry);
+    public bool IsTreeCoupledSurfacePlacementInternal(TileObjectPlacement placement) => owner.IsTreeCoupledSurfacePlacementInternal(placement);
+    public ulong ComputeStablePlacementHashInternal(GeneratedTerrainRequest request, TileObjectPlacement placement) => owner.ComputeStablePlacementHashInternal(request, placement);
+    public void PopulatePreparedPlacementGeometryNormalsInternal(GeneratedTerrainBatchState batchState, VegetationTileStreamingStats? tileStats, GeneratedTerrainRequest request, List<PreparedVegetationPlacement> preparedPlacements)
+        => owner.PopulatePreparedPlacementGeometryNormalsInternal(batchState, tileStats, request, preparedPlacements);
+    public bool TrySampleGeneratedTerrainSurfaceInternal(GStylizedTerrain terrain, float localX, float localZ, float verticalOffset, out Vector3 exactLocalSurfacePoint, out Vector3 exactLocalSurfaceNormal)
+        => owner.TrySampleGeneratedTerrainSurfaceInternal(terrain, localX, localZ, verticalOffset, out exactLocalSurfacePoint, out exactLocalSurfaceNormal);
+    public float SurfaceObjectVerticalOffsetInternal => owner.SurfaceObjectVerticalOffsetInternal;
+    public float GetSurfaceObjectOffsetInternal() => owner.GetSurfaceObjectOffsetInternal();
+}
+
+internal sealed class PlayerCentricSurfacePrototypePortAdapter : IPlayerCentricSurfacePrototypePort
+{
+    private readonly TileLoader owner;
+
+    public PlayerCentricSurfacePrototypePortAdapter(TileLoader owner)
+    {
+        this.owner = owner;
+    }
+
+    public GameObject? LoadPrefabForPlacementInternal(TileObjectPlacement placement, GeneratedTerrainBatchState? batchState) => owner.LoadPrefabForPlacementInternal(placement, batchState);
+    public bool IsTreePlacementInternal(TileObjectPlacement placement, GameObject prefab) => owner.IsTreePlacementInternal(placement, prefab);
+    public TileLoaderInstancedVegetationPrototype? GetOrCreateVegetationPrototypeInternal(GeneratedTerrainBatchState? batchState, TileObjectPlacement placement, GameObject prefab, bool isTreeObject, bool supportsPromotion)
+        => owner.GetOrCreateVegetationPrototypeInternal(batchState, placement, prefab, isTreeObject, supportsPromotion);
+    public bool SupportsHybridPromotionInternal(TileObjectPlacement placement) => owner.SupportsHybridPromotionInternal(placement);
+}
+
+internal sealed class PlayerCentricSurfaceRendererPortAdapter : IPlayerCentricSurfaceRendererPort
+{
+    private readonly TileLoader owner;
+    private readonly IInstancedVegetationRuntimeBudgetOwner runtimeBudgetOwner;
+
+    public PlayerCentricSurfaceRendererPortAdapter(TileLoader owner, IInstancedVegetationRuntimeBudgetOwner runtimeBudgetOwner)
+    {
+        this.owner = owner;
+        this.runtimeBudgetOwner = runtimeBudgetOwner;
+    }
+
+    public string GetVegetationContainerNameInternal() => owner.GetVegetationContainerNameInternal();
+    public VegetationLoadMode VegetationLoadModeInternal => owner.VegetationLoadModeInternal;
+    public float VegetationInteractionRadiusMetersInternal => owner.VegetationInteractionRadiusMetersInternal;
+    public float VegetationInteractionHysteresisMetersInternal => owner.VegetationInteractionHysteresisMetersInternal;
+    public float PrototypeInitBudgetMsPerFrameInternal => owner.PrototypeInitBudgetMsPerFrameInternal;
+    public IInstancedVegetationRuntimeBudgetOwner RuntimeBudgetOwnerInternal => runtimeBudgetOwner;
+    public void RetireGeneratedContainerInternal(Transform container) => owner.RetireGeneratedContainerInternal(container);
+}
+
 }

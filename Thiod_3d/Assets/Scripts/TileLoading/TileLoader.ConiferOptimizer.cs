@@ -4,16 +4,106 @@ using UnityEngine.Rendering.Universal;
 
 #nullable enable
 
-internal sealed class TileLoaderConiferOptimizer
+namespace Thiod.TileLoading.Runtime
 {
-    private readonly ConiferOptimizationContext context;
 
-    public TileLoaderConiferOptimizer(ConiferOptimizationContext context)
+internal enum TreeOptimizationTier
+{
+    Unknown = 0,
+    Full = 1,
+    Reduced = 2,
+    LowDetail = 3,
+    Culled = 4,
+}
+
+internal sealed class GeneratedTreeInstance
+{
+    public GeneratedTreeInstance(GameObject root)
+    {
+        Root = root;
+        Transform = root.transform;
+        LodGroup = root.GetComponent<LODGroup>();
+        Colliders = root.GetComponentsInChildren<Collider>(true);
+        Renderers = root.GetComponentsInChildren<Renderer>(true);
+        DecalProjectors = root.GetComponentsInChildren<DecalProjector>(true);
+        OriginalShadowCastingModes = new ShadowCastingMode[Renderers.Length];
+        OriginalReceiveShadows = new bool[Renderers.Length];
+        for (int i = 0; i < Renderers.Length; i++)
+        {
+            Renderer renderer = Renderers[i];
+            OriginalShadowCastingModes[i] = renderer.shadowCastingMode;
+            OriginalReceiveShadows[i] = renderer.receiveShadows;
+        }
+
+        OriginalDecalProjectorStates = new bool[DecalProjectors.Length];
+        for (int i = 0; i < DecalProjectors.Length; i++)
+        {
+            DecalProjector decalProjector = DecalProjectors[i];
+            OriginalDecalProjectorStates[i] = decalProjector != null && decalProjector.enabled;
+        }
+
+        LodObjects = ExtractLodObjects(LodGroup);
+        LowestAvailableLodIndex = FindLowestAvailableLodIndex(LodObjects);
+    }
+
+    public GameObject Root { get; }
+    public Transform Transform { get; }
+    public LODGroup? LodGroup { get; }
+    public Collider[] Colliders { get; }
+    public Renderer[] Renderers { get; }
+    public DecalProjector[] DecalProjectors { get; }
+    public ShadowCastingMode[] OriginalShadowCastingModes { get; }
+    public bool[] OriginalReceiveShadows { get; }
+    public bool[] OriginalDecalProjectorStates { get; }
+    public GameObject?[] LodObjects { get; }
+    public int? LowestAvailableLodIndex { get; }
+    public TreeOptimizationTier CurrentTier { get; set; }
+
+    private static GameObject?[] ExtractLodObjects(LODGroup? lodGroup)
+    {
+        if (lodGroup == null)
+        {
+            return System.Array.Empty<GameObject?>();
+        }
+
+        LOD[] lods = lodGroup.GetLODs();
+        var lodObjects = new GameObject?[lods.Length];
+        for (int i = 0; i < lods.Length; i++)
+        {
+            Renderer[] renderers = lods[i].renderers;
+            if (renderers != null && renderers.Length > 0 && renderers[0] != null)
+            {
+                lodObjects[i] = renderers[0].gameObject;
+            }
+        }
+
+        return lodObjects;
+    }
+
+    private static int? FindLowestAvailableLodIndex(GameObject?[] lodObjects)
+    {
+        for (int i = lodObjects.Length - 1; i >= 0; i--)
+        {
+            if (lodObjects[i] != null)
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+}
+
+internal sealed class TileLoaderTreeOptimizer
+{
+    private readonly TreeOptimizationContext context;
+
+    public TileLoaderTreeOptimizer(TreeOptimizationContext context)
     {
         this.context = context;
     }
 
-    public void ApplyOptimizationToAll(System.Collections.Generic.IReadOnlyList<GeneratedConiferInstance> instances, ConiferOptimizationTier tier)
+    public void ApplyOptimizationToAll(System.Collections.Generic.IReadOnlyList<GeneratedTreeInstance> instances, TreeOptimizationTier tier)
     {
         for (int i = 0; i < instances.Count; i++)
         {
@@ -21,41 +111,41 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    public ConiferOptimizationTier DetermineTier(
+    public TreeOptimizationTier DetermineTier(
         float sqrDistance,
         float fullDistanceSq,
         float reducedDistanceSq,
         float lowDetailDistanceSq)
     {
-        float culledDistanceSq = context.CulledConiferDistance * context.CulledConiferDistance;
+        float culledDistanceSq = context.CulledTreeDistance * context.CulledTreeDistance;
         if (sqrDistance <= fullDistanceSq)
         {
-            return ConiferOptimizationTier.Full;
+            return TreeOptimizationTier.Full;
         }
 
         if (sqrDistance <= reducedDistanceSq)
         {
-            return ConiferOptimizationTier.Reduced;
+            return TreeOptimizationTier.Reduced;
         }
 
         if (sqrDistance <= lowDetailDistanceSq)
         {
-            return ConiferOptimizationTier.LowDetail;
+            return TreeOptimizationTier.LowDetail;
         }
 
         return sqrDistance <= culledDistanceSq
-            ? ConiferOptimizationTier.LowDetail
-            : ConiferOptimizationTier.Culled;
+            ? TreeOptimizationTier.LowDetail
+            : TreeOptimizationTier.Culled;
     }
 
-    public void ApplyOptimization(GeneratedConiferInstance instance, ConiferOptimizationTier tier)
+    public void ApplyOptimization(GeneratedTreeInstance instance, TreeOptimizationTier tier)
     {
         if (instance.Root == null || instance.CurrentTier == tier)
         {
             return;
         }
 
-        if (tier == ConiferOptimizationTier.Culled)
+        if (tier == TreeOptimizationTier.Culled)
         {
             instance.Root.SetActive(false);
             instance.CurrentTier = tier;
@@ -69,56 +159,56 @@ internal sealed class TileLoaderConiferOptimizer
 
         switch (tier)
         {
-            case ConiferOptimizationTier.Full:
-                SetConiferLodObjects(instance, activeLodIndex: null);
-                SetConiferLodGroupEnabled(instance, true);
-                SetConiferCollidersEnabled(instance, true);
-                RestoreConiferRendererState(instance);
-                RestoreConiferDecalState(instance);
+            case TreeOptimizationTier.Full:
+                SetTreeLodObjects(instance, activeLodIndex: null);
+                SetTreeLodGroupEnabled(instance, true);
+                SetTreeCollidersEnabled(instance, true);
+                RestoreTreeRendererState(instance);
+                RestoreTreeDecalState(instance);
                 break;
-            case ConiferOptimizationTier.Reduced:
-                SetConiferLodObjects(instance, activeLodIndex: null);
-                SetConiferLodGroupEnabled(instance, true);
-                SetConiferCollidersEnabled(instance, !context.DisableDistantConiferColliders);
-                if (context.DisableDistantConiferShadows)
+            case TreeOptimizationTier.Reduced:
+                SetTreeLodObjects(instance, activeLodIndex: null);
+                SetTreeLodGroupEnabled(instance, true);
+                SetTreeCollidersEnabled(instance, !context.DisableDistantTreeColliders);
+                if (context.DisableDistantTreeShadows)
                 {
-                    SetConiferShadowsEnabled(instance, false);
+                    SetTreeShadowsEnabled(instance, false);
                 }
                 else
                 {
-                    RestoreConiferRendererState(instance);
+                    RestoreTreeRendererState(instance);
                 }
 
-                if (context.DisableDistantConiferDecals)
+                if (context.DisableDistantTreeDecals)
                 {
-                    SetConiferDecalsEnabled(instance, false);
+                    SetTreeDecalsEnabled(instance, false);
                 }
                 else
                 {
-                    RestoreConiferDecalState(instance);
+                    RestoreTreeDecalState(instance);
                 }
 
                 break;
-            case ConiferOptimizationTier.LowDetail:
-                SetConiferLodObjects(instance, activeLodIndex: instance.LowestAvailableLodIndex);
-                SetConiferLodGroupEnabled(instance, false);
-                SetConiferCollidersEnabled(instance, false);
-                if (context.DisableDistantConiferShadows)
+            case TreeOptimizationTier.LowDetail:
+                SetTreeLodObjects(instance, activeLodIndex: instance.LowestAvailableLodIndex);
+                SetTreeLodGroupEnabled(instance, false);
+                SetTreeCollidersEnabled(instance, false);
+                if (context.DisableDistantTreeShadows)
                 {
-                    SetConiferShadowsEnabled(instance, false);
+                    SetTreeShadowsEnabled(instance, false);
                 }
                 else
                 {
-                    RestoreConiferRendererState(instance);
+                    RestoreTreeRendererState(instance);
                 }
 
-                if (context.DisableDistantConiferDecals)
+                if (context.DisableDistantTreeDecals)
                 {
-                    SetConiferDecalsEnabled(instance, false);
+                    SetTreeDecalsEnabled(instance, false);
                 }
                 else
                 {
-                    RestoreConiferDecalState(instance);
+                    RestoreTreeDecalState(instance);
                 }
 
                 break;
@@ -178,7 +268,7 @@ internal sealed class TileLoaderConiferOptimizer
         return false;
     }
 
-    private static void SetConiferLodGroupEnabled(GeneratedConiferInstance instance, bool enabled)
+    private static void SetTreeLodGroupEnabled(GeneratedTreeInstance instance, bool enabled)
     {
         if (instance.LodGroup != null)
         {
@@ -186,7 +276,7 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    private static void SetConiferCollidersEnabled(GeneratedConiferInstance instance, bool enabled)
+    private static void SetTreeCollidersEnabled(GeneratedTreeInstance instance, bool enabled)
     {
         for (int i = 0; i < instance.Colliders.Length; i++)
         {
@@ -198,7 +288,7 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    private static void SetConiferLodObjects(GeneratedConiferInstance instance, int? activeLodIndex)
+    private static void SetTreeLodObjects(GeneratedTreeInstance instance, int? activeLodIndex)
     {
         GameObject?[] lodObjects = instance.LodObjects;
         if (lodObjects.Length == 0)
@@ -222,7 +312,7 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    private static void SetConiferShadowsEnabled(GeneratedConiferInstance instance, bool enabled)
+    private static void SetTreeShadowsEnabled(GeneratedTreeInstance instance, bool enabled)
     {
         for (int i = 0; i < instance.Renderers.Length; i++)
         {
@@ -239,7 +329,7 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    private static void RestoreConiferRendererState(GeneratedConiferInstance instance)
+    private static void RestoreTreeRendererState(GeneratedTreeInstance instance)
     {
         for (int i = 0; i < instance.Renderers.Length; i++)
         {
@@ -254,7 +344,7 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    private static void SetConiferDecalsEnabled(GeneratedConiferInstance instance, bool enabled)
+    private static void SetTreeDecalsEnabled(GeneratedTreeInstance instance, bool enabled)
     {
         for (int i = 0; i < instance.DecalProjectors.Length; i++)
         {
@@ -266,7 +356,7 @@ internal sealed class TileLoaderConiferOptimizer
         }
     }
 
-    private static void RestoreConiferDecalState(GeneratedConiferInstance instance)
+    private static void RestoreTreeDecalState(GeneratedTreeInstance instance)
     {
         for (int i = 0; i < instance.DecalProjectors.Length; i++)
         {
@@ -277,4 +367,149 @@ internal sealed class TileLoaderConiferOptimizer
             }
         }
     }
+}
+
+internal sealed class TileLoaderTreeOptimizationController
+{
+    private readonly TileLoader owner;
+    private readonly System.Collections.Generic.List<GeneratedTreeInstance> generatedTreeInstances = new();
+    private bool treeOptimizationWasActive;
+    private float nextTreeOptimizationTime;
+
+    public TileLoaderTreeOptimizationController(TileLoader owner)
+    {
+        this.owner = owner;
+    }
+
+    public void ResetState()
+    {
+        generatedTreeInstances.Clear();
+        treeOptimizationWasActive = false;
+        nextTreeOptimizationTime = 0f;
+    }
+
+    public void RegisterGeneratedTree(GameObject instance)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        generatedTreeInstances.Add(new GeneratedTreeInstance(instance));
+    }
+
+    public void UpdateRuntimeOptimization(bool holdAtFull)
+    {
+        if (!owner.UsesLegacyVegetationObjectsInternal() || !owner.OptimizeTreesByDistanceInternal)
+        {
+            if (treeOptimizationWasActive)
+            {
+                ApplyOptimizationToAll(TreeOptimizationTier.Full);
+                treeOptimizationWasActive = false;
+            }
+
+            return;
+        }
+
+        if (holdAtFull)
+        {
+            ApplyOptimizationToAll(TreeOptimizationTier.Full);
+            treeOptimizationWasActive = false;
+            nextTreeOptimizationTime = Time.unscaledTime + Mathf.Max(0.05f, owner.TreeOptimizationIntervalInternal);
+            return;
+        }
+
+        treeOptimizationWasActive = true;
+        if (Time.unscaledTime < nextTreeOptimizationTime)
+        {
+            return;
+        }
+
+        nextTreeOptimizationTime = Time.unscaledTime + Mathf.Max(0.05f, owner.TreeOptimizationIntervalInternal);
+        UpdateOptimization(forceFullIfNoTarget: false);
+    }
+
+    public void UpdateOptimization(bool forceFullIfNoTarget = false)
+    {
+        PruneDestroyedTrees();
+        if (generatedTreeInstances.Count == 0)
+        {
+            return;
+        }
+
+        Transform? target = ResolveOptimizationTarget();
+        if (target == null)
+        {
+            if (forceFullIfNoTarget)
+            {
+                ApplyOptimizationToAll(TreeOptimizationTier.Full);
+            }
+
+            return;
+        }
+
+        TileLoaderTreeOptimizer optimizer = owner.CreateTreeOptimizerInternal();
+        float fullDistanceSq = owner.FullTreeDistanceInternal * owner.FullTreeDistanceInternal;
+        float reducedDistanceSq = owner.ReducedTreeDistanceInternal * owner.ReducedTreeDistanceInternal;
+        float lowDetailDistanceSq = owner.LowDetailTreeDistanceInternal * owner.LowDetailTreeDistanceInternal;
+
+        for (int i = 0; i < generatedTreeInstances.Count; i++)
+        {
+            GeneratedTreeInstance instance = generatedTreeInstances[i];
+            float sqrDistance = (instance.Transform.position - target.position).sqrMagnitude;
+            TreeOptimizationTier tier = optimizer.DetermineTier(
+                sqrDistance,
+                fullDistanceSq,
+                reducedDistanceSq,
+                lowDetailDistanceSq);
+            optimizer.ApplyOptimization(instance, tier);
+        }
+    }
+
+    public void ApplyOptimizationToAll(TreeOptimizationTier tier)
+    {
+        PruneDestroyedTrees();
+        if (generatedTreeInstances.Count == 0)
+        {
+            return;
+        }
+
+        owner.CreateTreeOptimizerInternal().ApplyOptimizationToAll(generatedTreeInstances, tier);
+    }
+
+    private void PruneDestroyedTrees()
+    {
+        generatedTreeInstances.RemoveAll(instance => instance.Root == null);
+    }
+
+    private Transform? ResolveOptimizationTarget()
+    {
+        Transform? target = owner.TreeOptimizationTargetInternal;
+        if (target != null && target.gameObject.scene.IsValid())
+        {
+            return target;
+        }
+
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithComponent("UltimateCharacterLocomotion", out Transform? ultimateLocomotionTransform))
+        {
+            owner.TreeOptimizationTargetInternal = ultimateLocomotionTransform;
+            return ultimateLocomotionTransform;
+        }
+
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithComponent("CharacterLocomotion", out Transform? locomotionTransform))
+        {
+            owner.TreeOptimizationTargetInternal = locomotionTransform;
+            return locomotionTransform;
+        }
+
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
+        {
+            owner.TreeOptimizationTargetInternal = taggedPlayerTransform;
+            return taggedPlayerTransform;
+        }
+
+        return Camera.main != null ? Camera.main.transform : null;
+    }
+}
+
 }

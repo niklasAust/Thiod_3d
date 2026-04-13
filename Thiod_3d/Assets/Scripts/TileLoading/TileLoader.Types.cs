@@ -10,14 +10,8 @@ using WorldGen;
 
 #nullable enable
 
-internal enum ConiferOptimizationTier
+namespace Thiod.TileLoading.Runtime
 {
-    Unknown = 0,
-    Full = 1,
-    Reduced = 2,
-    LowDetail = 3,
-    Culled = 4,
-}
 
 internal sealed class RiverWaterSeamCrossSection
 {
@@ -42,84 +36,6 @@ internal sealed class RiverWaterSeamCrossSection
         LeftWorld = leftWorld;
         RightWorld = rightWorld;
         HasVertices = true;
-    }
-}
-
-internal sealed class GeneratedConiferInstance
-{
-    public GeneratedConiferInstance(GameObject root)
-    {
-        Root = root;
-        Transform = root.transform;
-        LodGroup = root.GetComponent<LODGroup>();
-        Colliders = root.GetComponentsInChildren<Collider>(true);
-        Renderers = root.GetComponentsInChildren<Renderer>(true);
-        DecalProjectors = root.GetComponentsInChildren<DecalProjector>(true);
-        OriginalShadowCastingModes = new ShadowCastingMode[Renderers.Length];
-        OriginalReceiveShadows = new bool[Renderers.Length];
-        for (int i = 0; i < Renderers.Length; i++)
-        {
-            Renderer renderer = Renderers[i];
-            OriginalShadowCastingModes[i] = renderer.shadowCastingMode;
-            OriginalReceiveShadows[i] = renderer.receiveShadows;
-        }
-
-        OriginalDecalProjectorStates = new bool[DecalProjectors.Length];
-        for (int i = 0; i < DecalProjectors.Length; i++)
-        {
-            DecalProjector decalProjector = DecalProjectors[i];
-            OriginalDecalProjectorStates[i] = decalProjector != null && decalProjector.enabled;
-        }
-
-        LodObjects = ExtractLodObjects(LodGroup);
-        LowestAvailableLodIndex = FindLowestAvailableLodIndex(LodObjects);
-    }
-
-    public GameObject Root { get; }
-    public Transform Transform { get; }
-    public LODGroup? LodGroup { get; }
-    public Collider[] Colliders { get; }
-    public Renderer[] Renderers { get; }
-    public DecalProjector[] DecalProjectors { get; }
-    public ShadowCastingMode[] OriginalShadowCastingModes { get; }
-    public bool[] OriginalReceiveShadows { get; }
-    public bool[] OriginalDecalProjectorStates { get; }
-    public GameObject?[] LodObjects { get; }
-    public int? LowestAvailableLodIndex { get; }
-    public ConiferOptimizationTier CurrentTier { get; set; }
-
-    private static GameObject?[] ExtractLodObjects(LODGroup? lodGroup)
-    {
-        if (lodGroup == null)
-        {
-            return Array.Empty<GameObject?>();
-        }
-
-        LOD[] lods = lodGroup.GetLODs();
-        var lodObjects = new GameObject?[lods.Length];
-        for (int i = 0; i < lods.Length; i++)
-        {
-            Renderer[] renderers = lods[i].renderers;
-            if (renderers != null && renderers.Length > 0 && renderers[0] != null)
-            {
-                lodObjects[i] = renderers[0].gameObject;
-            }
-        }
-
-        return lodObjects;
-    }
-
-    private static int? FindLowestAvailableLodIndex(GameObject?[] lodObjects)
-    {
-        for (int i = lodObjects.Length - 1; i >= 0; i--)
-        {
-            if (lodObjects[i] != null)
-            {
-                return i;
-            }
-        }
-
-        return null;
     }
 }
 
@@ -435,80 +351,6 @@ internal readonly struct PreparedVegetationPlacement
             ForceInstancingOnly,
             geometry);
     }
-}
-
-internal readonly struct PlayerCentricSurfaceCellKey : IEquatable<PlayerCentricSurfaceCellKey>
-{
-    public PlayerCentricSurfaceCellKey(int x, int y, Vector2Int ownerTileCoordinate)
-    {
-        X = x;
-        Y = y;
-        OwnerTileCoordinate = ownerTileCoordinate;
-    }
-
-    public int X { get; }
-    public int Y { get; }
-    public Vector2Int OwnerTileCoordinate { get; }
-
-    public bool Equals(PlayerCentricSurfaceCellKey other)
-        => X == other.X &&
-           Y == other.Y &&
-           OwnerTileCoordinate == other.OwnerTileCoordinate;
-
-    public override bool Equals(object? obj)
-        => obj is PlayerCentricSurfaceCellKey other && Equals(other);
-
-    public override int GetHashCode()
-        => HashCode.Combine(X, Y, OwnerTileCoordinate);
-
-    public override string ToString()
-        => $"cell({X},{Y})@tile({OwnerTileCoordinate.x},{OwnerTileCoordinate.y})";
-}
-
-internal sealed class PlayerCentricSurfaceCellSource
-{
-    public PlayerCentricSurfaceCellSource(
-        PlayerCentricSurfaceCellKey cellKey,
-        Vector2Int ownerTileCoordinate,
-        GStylizedTerrain terrain)
-    {
-        CellKey = cellKey;
-        OwnerTileCoordinate = ownerTileCoordinate;
-        Terrain = terrain;
-        Prototypes = new List<TileLoaderInstancedVegetationPrototype>();
-        Placements = new List<TileLoaderInstancedVegetationPlacement>();
-        PrototypeIndices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-    }
-
-    public PlayerCentricSurfaceCellKey CellKey { get; }
-    public Vector2Int OwnerTileCoordinate { get; }
-    public GStylizedTerrain Terrain { get; set; }
-    public List<TileLoaderInstancedVegetationPrototype> Prototypes { get; }
-    public List<TileLoaderInstancedVegetationPlacement> Placements { get; }
-    public Dictionary<string, int> PrototypeIndices { get; }
-    public Transform? RuntimeContainer { get; set; }
-    public int PlacementCount => Placements.Count;
-}
-
-internal sealed class PlayerCentricSurfaceTileCache
-{
-    public PlayerCentricSurfaceTileCache(
-        Vector2Int tileCoordinate,
-        string cacheSignature,
-        GStylizedTerrain terrain)
-    {
-        TileCoordinate = tileCoordinate;
-        CacheSignature = cacheSignature ?? string.Empty;
-        Terrain = terrain;
-        TerrainInstanceId = terrain != null ? terrain.GetInstanceID() : 0;
-        CellKeys = new HashSet<PlayerCentricSurfaceCellKey>();
-    }
-
-    public Vector2Int TileCoordinate { get; }
-    public string CacheSignature { get; set; }
-    public GStylizedTerrain Terrain { get; set; }
-    public int TerrainInstanceId { get; set; }
-    public HashSet<PlayerCentricSurfaceCellKey> CellKeys { get; }
 }
 
 internal sealed class VegetationTileStreamingStats
@@ -853,7 +695,7 @@ internal sealed class GeneratedTerrainBatchState
     public Dictionary<Vector2Int, GStylizedTerrain> TerrainByCoordinate { get; }
     public Dictionary<Vector2Int, GeneratedTerrainRequest> RequestsByCoordinate { get; }
     public Transform? BatchRoot { get; set; }
-    public DeferredGenerationPhase NextDeferredPhase { get; set; }
+    public DeferredGenerationPhase NextDeferredPhase { get; private set; }
     public Dictionary<string, Spline> RiverSplineCache { get; }
     public List<GeneratedTerrainRequest> RiverRefreshRequests { get; }
     public List<GStylizedTerrain> RiverRefreshTerrains { get; }
@@ -866,7 +708,7 @@ internal sealed class GeneratedTerrainBatchState
     public Dictionary<string, int> VegetationQueuedPlacementsByBucket { get; }
     public Dictionary<string, int> VegetationQueuedWorkItemsByBucket { get; }
     public Vector3? VegetationStreamingTargetWorldPosition { get; set; }
-    public bool TerrainStageVisible { get; set; }
+    public bool TerrainStageVisible { get; private set; }
     public int ReusedTerrainCount { get; set; }
     public int RemovedTerrainCount { get; set; }
     public int ReusedRequestCount { get; set; }
@@ -899,8 +741,8 @@ internal sealed class GeneratedTerrainBatchState
     public double VegetationRendererFinalizeMilliseconds { get; set; }
     public int VegetationHeightmapSampleCount { get; set; }
     public int VegetationRaycastSampleCount { get; set; }
-    public double VegetationCenterReadyMilliseconds { get; set; }
-    public double VegetationFullSettledMilliseconds { get; set; }
+    public double VegetationCenterReadyMilliseconds { get; private set; }
+    public double VegetationFullSettledMilliseconds { get; private set; }
     public int PlayerCentricSurfaceTileCacheBuildCount { get; set; }
     public int PlayerCentricSurfaceCellBuildCount { get; set; }
     public int PlayerCentricSurfacePlacementCount { get; set; }
@@ -912,6 +754,73 @@ internal sealed class GeneratedTerrainBatchState
     public double PlayerCentricSurfaceSourceBuildCpuMilliseconds { get; set; }
     public double PlayerCentricSurfaceFirstVisibleMilliseconds { get; set; }
     public double PlayerCentricSurfaceFullSettledMilliseconds { get; set; }
+
+    public bool HasDeferredWorkRemaining => NextDeferredPhase != DeferredGenerationPhase.Completed;
+
+    public bool IsAwaitingPhase(DeferredGenerationPhase phase) => NextDeferredPhase == phase;
+
+    public DeferredGenerationPhase AdvanceDeferredPhase()
+    {
+        NextDeferredPhase = NextDeferredPhase switch
+        {
+            DeferredGenerationPhase.RiverWater => DeferredGenerationPhase.DebugSplines,
+            DeferredGenerationPhase.DebugSplines => DeferredGenerationPhase.Vegetation,
+            DeferredGenerationPhase.Vegetation => DeferredGenerationPhase.Completed,
+            _ => DeferredGenerationPhase.Completed,
+        };
+
+        return NextDeferredPhase;
+    }
+
+    public void MarkDeferredWorkflowCompleted()
+    {
+        NextDeferredPhase = DeferredGenerationPhase.Completed;
+    }
+
+    public bool TryPromoteTerrainStageVisible()
+    {
+        if (TerrainStageVisible)
+        {
+            return false;
+        }
+
+        TerrainStageVisible = true;
+        return true;
+    }
+
+    public bool TryMarkVegetationCenterReady(double elapsedMilliseconds)
+    {
+        if (VegetationCenterReadyMilliseconds > 0d)
+        {
+            return false;
+        }
+
+        VegetationCenterReadyMilliseconds = elapsedMilliseconds;
+        return true;
+    }
+
+    public void MarkVegetationFullySettled(double elapsedMilliseconds)
+    {
+        VegetationFullSettledMilliseconds = elapsedMilliseconds;
+    }
+
+    public bool HasCreatedTerrain(Vector2Int tileCoordinate)
+    {
+        return TerrainByCoordinate.ContainsKey(tileCoordinate);
+    }
+
+    public void RegisterCreatedTerrain(Vector2Int tileCoordinate, GeneratedTerrainRequest request, GStylizedTerrain terrain)
+    {
+        CreatedTerrains.Add(terrain);
+        CreatedRequests.Add(request);
+        TerrainByCoordinate[tileCoordinate] = terrain;
+    }
+
+    public void RegisterReusedTerrain(Vector2Int tileCoordinate, GStylizedTerrain terrain)
+    {
+        TerrainByCoordinate[tileCoordinate] = terrain;
+        ReusedTerrainCount++;
+    }
 
     public void RecordPhaseTiming(string phaseName, double elapsedMilliseconds)
     {
@@ -1040,4 +949,6 @@ internal enum TerrainShadingMode
 {
     PolarisTextureBlend,
     FallbackLit,
+}
+
 }

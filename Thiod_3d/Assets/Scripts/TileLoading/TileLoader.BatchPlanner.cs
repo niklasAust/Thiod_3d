@@ -7,6 +7,9 @@ using WorldGen;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class TileLoaderBatchPlanner
 {
     internal readonly struct BatchBuildResult
@@ -456,4 +459,6 @@ internal sealed class TileLoaderBatchPlanner
 
         return 100 + Math.Abs(offsetY) * 10 + Math.Abs(offsetX);
     }
+}
+
 }

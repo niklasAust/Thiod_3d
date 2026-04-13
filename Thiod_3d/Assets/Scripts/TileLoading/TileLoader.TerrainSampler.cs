@@ -7,6 +7,9 @@ using Pinwheel.Griffin.API;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class TileLoaderTerrainSampler
 {
     private readonly VegetationBuildContext context;
@@ -412,4 +415,6 @@ internal sealed class TileLoaderTerrainSampler
         Polaris.DecodeHeightMapSample(sample, ref height01, ref subdiv01, ref visibility01);
         return height01;
     }
+}
+
 }

@@ -1,5 +1,9 @@
 using UnityEditor;
 using UnityEngine;
+using Thiod.TileLoading.Runtime;
+
+namespace Thiod.TileLoading.EditorTools
+{
 
 [CustomEditor(typeof(TileLoader))]
 public sealed class TileLoaderEditor : Editor
@@ -44,4 +48,6 @@ public sealed class TileLoaderEditor : Editor
             EditorUtility.SetDirty(loader);
         }
     }
+}
+
 }

@@ -8,6 +8,9 @@ using WorldGen;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal static class TileLoaderWorldDataUtility
 {
     public static GenerationSettings ResolveGenerationSettings(TerrainBuildContext context, IReadOnlyDictionary<string, object> metadata)
@@ -411,4 +414,6 @@ internal static class TileLoaderWorldDataUtility
 
         return Array.Empty<string>();
     }
+}
+
 }

@@ -5,6 +5,9 @@ using WorldGen;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal static class TileLoaderVegetationPrototypeFactory
 {
     public static bool RequiresInstancingOnly(TileObjectPlacement placement)
@@ -117,4 +120,6 @@ internal static class TileLoaderVegetationPrototypeFactory
 
         return normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ? null : normalized;
     }
+}
+
 }

@@ -24,6 +24,9 @@ using Pinwheel.Griffin.API;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 [ExecuteAlways]
 public sealed partial class TileLoader : MonoBehaviour
 {
@@ -208,17 +211,27 @@ public sealed partial class TileLoader : MonoBehaviour
     [SerializeField, Min(0f)] private float riverWaterMinSegmentLength = 0.05f;
     [SerializeField, Min(1)] private int riverWaterTangentSmoothingRadius = 4;
 
-    [Header("Vegetation Optimization")]
-    [SerializeField] private bool optimizeConifersByDistance = true;
-    [SerializeField] private Transform? coniferOptimizationTarget;
-    [SerializeField] private float fullConiferDistance = 80f;
-    [SerializeField] private float reducedConiferDistance = 160f;
-    [SerializeField] private float lowDetailConiferDistance = 280f;
-    [SerializeField] private float culledConiferDistance = 420f;
-    [SerializeField] private float coniferOptimizationInterval = 0.25f;
-    [SerializeField] private bool disableDistantConiferColliders = true;
-    [SerializeField] private bool disableDistantConiferShadows = true;
-    [SerializeField] private bool disableDistantConiferDecals = true;
+    [Header("Tree Optimization")]
+    [FormerlySerializedAs("optimizeConifersByDistance")]
+    [SerializeField] private bool optimizeTreesByDistance = true;
+    [FormerlySerializedAs("coniferOptimizationTarget")]
+    [SerializeField] private Transform? treeOptimizationTarget;
+    [FormerlySerializedAs("fullConiferDistance")]
+    [SerializeField] private float fullTreeDistance = 80f;
+    [FormerlySerializedAs("reducedConiferDistance")]
+    [SerializeField] private float reducedTreeDistance = 160f;
+    [FormerlySerializedAs("lowDetailConiferDistance")]
+    [SerializeField] private float lowDetailTreeDistance = 280f;
+    [FormerlySerializedAs("culledConiferDistance")]
+    [SerializeField] private float culledTreeDistance = 420f;
+    [FormerlySerializedAs("coniferOptimizationInterval")]
+    [SerializeField] private float treeOptimizationInterval = 0.25f;
+    [FormerlySerializedAs("disableDistantConiferColliders")]
+    [SerializeField] private bool disableDistantTreeColliders = true;
+    [FormerlySerializedAs("disableDistantConiferShadows")]
+    [SerializeField] private bool disableDistantTreeShadows = true;
+    [FormerlySerializedAs("disableDistantConiferDecals")]
+    [SerializeField] private bool disableDistantTreeDecals = true;
 
     [Header("Grass Surface Alignment")]
     [SerializeField] private float grassClusterConformSurfaceOffset = -0.1f;
@@ -229,43 +242,18 @@ public sealed partial class TileLoader : MonoBehaviour
     [SerializeField] private bool logVegetationPlacementWorkItems = true;
     [SerializeField, HideInInspector] private List<GeneratedTerrainShadingMetadata> generatedTerrainShadingMetadata = new();
 
-    private bool hasLoadedInCurrentEnableCycle;
-    private bool coniferOptimizationWasActive;
-    private float nextConiferOptimizationTime;
-    private bool pendingRuntimeSeamRebuild;
-    private int runtimeSeamRebuildFrame;
     private bool hasWarnedMissingTerrainDecalRenderingLayer;
-#if UNITY_EDITOR
-    private bool pendingEditorSeamRebuild;
-#endif
-    private readonly List<GeneratedConiferInstance> generatedConiferInstances = new();
     private readonly Dictionary<string, GameObject?> prefabCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TileLoaderInstancedVegetationPrototype?> vegetationPrototypeCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> loggedMissingPrefabPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> missingPrefabSkipCounts = new(StringComparer.OrdinalIgnoreCase);
-    private TerrainSceneFacade? terrainSceneFacade;
-    private GeneratedTerrainBatchCacheEntry? cachedTerrainBatch;
-    private int activeGenerationPipelineId;
     private Material? cachedRiverWaterMaterial;
     private string? cachedRiverWaterMaterialPath;
-    private TileLoaderRuntime? runtime;
-    private TerrainStreamingPipeline? terrainStreamingPipeline;
-    private VegetationStreamingController? vegetationStreamingController;
-    private PlayerCentricSurfaceController? playerCentricSurfaceController;
-    private GenerationReporter? generationReporter;
-    private TileLoaderFrameBudgetCoordinator? runtimeFrameBudgetCoordinator;
+    private TileLoaderRuntimeState? runtimeState;
+    private TileLoaderServices? services;
     private readonly List<TileLoaderInstancedVegetationRenderer> scheduledInteractiveVegetationRenderers = new();
     private readonly HashSet<TileLoaderInstancedVegetationRenderer> scheduledInteractiveVegetationRendererSet = new();
     private int nextScheduledInteractiveVegetationRendererIndex;
-    private int lastCompletedGenerationPipelineId;
-    private Vector3Int? lastCompletedRuntimeNeighborhoodCenterTileCoordinate;
-    private bool terrainPhaseLoadInProgress;
-    private Coroutine? activeTerrainLoadCoroutine;
-    private TileLoaderTerrainSampler? cachedTerrainSampler;
-    private Vector3Int? activeLoadedUnityTileCoordinate;
-    private Vector3Int? activeRuntimeRequestedTileCoordinate;
-    private Vector3? lastVegetationStreamingTargetWorldPosition;
-    private readonly Dictionary<Vector2Int, VegetationTileStreamingStatus> runtimeVegetationTileStatusByCoordinate = new();
     private static readonly Dictionary<string, CachedLoadedWorldData> LoadedWorldDataCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ProfilerMarker BatchWorldgenMarker = new("TileLoader.BatchWorldgen");
     private static readonly ProfilerMarker TerrainCreationMarker = new("TileLoader.TerrainCreation");
@@ -280,7 +268,92 @@ public sealed partial class TileLoader : MonoBehaviour
     private static readonly ProfilerMarker TerrainConnectAdjacentMarker = new("TileLoader.TerrainSeams.ConnectAdjacentTiles");
     private static readonly ProfilerMarker VegetationInteractionSchedulerMarker = new("TileLoader.VegetationInteractionScheduler");
 
-    private TerrainSceneFacade TerrainScene => terrainSceneFacade ??= new TerrainSceneFacade(this);
+    private TileLoaderRuntimeState State => runtimeState ??= new TileLoaderRuntimeState();
+    private TileLoaderServices Services => services ??= TileLoaderCompositionBuilder.CreateServices(this, State);
+    private TerrainSceneFacade TerrainScene => Services.TerrainScene;
+    private bool hasLoadedInCurrentEnableCycle
+    {
+        get => State.HasLoadedInCurrentEnableCycle;
+        set => State.HasLoadedInCurrentEnableCycle = value;
+    }
+    private bool pendingRuntimeSeamRebuild
+    {
+        get => State.PendingRuntimeSeamRebuild;
+        set => State.PendingRuntimeSeamRebuild = value;
+    }
+    private int runtimeSeamRebuildFrame
+    {
+        get => State.RuntimeSeamRebuildFrame;
+        set => State.RuntimeSeamRebuildFrame = value;
+    }
+#if UNITY_EDITOR
+    private bool pendingEditorSeamRebuild
+    {
+        get => State.PendingEditorSeamRebuild;
+        set => State.PendingEditorSeamRebuild = value;
+    }
+#endif
+    private GeneratedTerrainBatchCacheEntry? cachedTerrainBatch
+    {
+        get => State.CachedTerrainBatch;
+        set => State.CachedTerrainBatch = value;
+    }
+    private int activeGenerationPipelineId
+    {
+        get => State.ActiveGenerationPipelineId;
+        set => State.ActiveGenerationPipelineId = value;
+    }
+    private int lastCompletedGenerationPipelineId
+    {
+        get => State.LastCompletedGenerationPipelineId;
+        set => State.LastCompletedGenerationPipelineId = value;
+    }
+    private Vector3Int? lastCompletedRuntimeNeighborhoodCenterTileCoordinate
+    {
+        get => State.LastCompletedRuntimeNeighborhoodCenterTileCoordinate;
+        set => State.LastCompletedRuntimeNeighborhoodCenterTileCoordinate = value;
+    }
+    private bool terrainPhaseLoadInProgress
+    {
+        get => State.TerrainPhaseLoadInProgress;
+        set => State.TerrainPhaseLoadInProgress = value;
+    }
+    private Coroutine? activeTerrainLoadCoroutine
+    {
+        get => State.ActiveTerrainLoadCoroutine;
+        set => State.ActiveTerrainLoadCoroutine = value;
+    }
+    private Vector3Int? activeLoadedUnityTileCoordinate
+    {
+        get => State.ActiveLoadedUnityTileCoordinate;
+        set => State.ActiveLoadedUnityTileCoordinate = value;
+    }
+    private Vector3Int? activeRuntimeRequestedTileCoordinate
+    {
+        get => State.ActiveRuntimeRequestedTileCoordinate;
+        set => State.ActiveRuntimeRequestedTileCoordinate = value;
+    }
+    private Vector3? lastVegetationStreamingTargetWorldPosition
+    {
+        get => State.LastVegetationStreamingTargetWorldPosition;
+        set => State.LastVegetationStreamingTargetWorldPosition = value;
+    }
+    private Dictionary<Vector2Int, VegetationTileStreamingStatus> runtimeVegetationTileStatusByCoordinate
+        => State.RuntimeVegetationTileStatusByCoordinate;
+    private TileLoaderTerrainSampler? cachedTerrainSampler
+    {
+        get => services?.CachedTerrainSampler;
+        set
+        {
+            if (value == null)
+            {
+                services?.ClearTerrainSampler();
+                return;
+            }
+
+            Services.CachedTerrainSampler = value;
+        }
+    }
     private Transform? activeGeneratedTerrainRoot
     {
         get => TerrainScene.ActiveGeneratedTerrainRoot;
@@ -294,28 +367,26 @@ public sealed partial class TileLoader : MonoBehaviour
     private Dictionary<Vector2Int, GeneratedTerrainTileData> activeTerrainTileCache => TerrainScene.ActiveTerrainTileCache;
     private static readonly ProfilerMarker VegetationPlacementMarker = new("TileLoader.VegetationPlacement");
     private static readonly ProfilerMarker VegetationRenderMarker = new("TileLoader.VegetationRender");
+    private TileLoaderRuntime Runtime => Services.Runtime;
 
     private void OnEnable()
     {
-        runtime ??= new TileLoaderRuntime(this);
-        runtime.OnEnable();
+        Runtime.OnEnable();
     }
 
     private void Start()
     {
-        runtime ??= new TileLoaderRuntime(this);
-        runtime.Start();
+        Runtime.Start();
     }
 
     private void OnDisable()
     {
-        runtime?.OnDisable();
+        services?.OnDisableRuntime();
     }
 
     private void Update()
     {
-        runtime ??= new TileLoaderRuntime(this);
-        runtime.Update();
+        Runtime.Update();
     }
 
     internal bool DynamicTileLoadingEnabled => dynamicTileLoadingEnabled;
@@ -345,8 +416,8 @@ public sealed partial class TileLoader : MonoBehaviour
     internal float TerrainLengthInternal => terrainLength;
     internal bool LoadOnEnableInEditModeInternal => loadOnEnableInEditMode;
     internal bool LoadOnStartInPlayModeInternal => loadOnStartInPlayMode;
-    internal bool OptimizeConifersByDistanceInternal => optimizeConifersByDistance;
-    internal float ConiferOptimizationIntervalInternal => coniferOptimizationInterval;
+    internal bool OptimizeTreesByDistanceInternal => optimizeTreesByDistance;
+    internal float TreeOptimizationIntervalInternal => treeOptimizationInterval;
     internal bool PlayerCentricSurfaceVegetationEnabledInternal => playerCentricSurfaceVegetationEnabled;
     internal float PlayerCentricSurfaceRadiusMetersInternal => playerCentricSurfaceRadiusMeters;
     internal float PlayerCentricSurfaceHysteresisMetersInternal => playerCentricSurfaceHysteresisMeters;
@@ -378,17 +449,6 @@ public sealed partial class TileLoader : MonoBehaviour
         get => lastVegetationStreamingTargetWorldPosition;
         set => lastVegetationStreamingTargetWorldPosition = value;
     }
-    internal bool ConiferOptimizationWasActive
-    {
-        get => coniferOptimizationWasActive;
-        set => coniferOptimizationWasActive = value;
-    }
-    internal float NextConiferOptimizationTime
-    {
-        get => nextConiferOptimizationTime;
-        set => nextConiferOptimizationTime = value;
-    }
-
     internal int ActiveGenerationPipelineIdInternal => activeGenerationPipelineId;
     internal bool TerrainPhaseLoadInProgressInternal
     {
@@ -406,17 +466,28 @@ public sealed partial class TileLoader : MonoBehaviour
         get => activeRuntimeRequestedTileCoordinate;
         set => activeRuntimeRequestedTileCoordinate = value;
     }
-    internal Vector3Int? TileGateBlockedUnityTileCoordinateInternal => runtime?.BlockedDynamicUnityTileCoordinateInternal;
+    internal Vector3Int? TileGateBlockedUnityTileCoordinateInternal => services?.Runtime.BlockedDynamicUnityTileCoordinateInternal;
     internal GeneratedTerrainBatchCacheEntry? CachedTerrainBatchInternal
     {
         get => cachedTerrainBatch;
         set => cachedTerrainBatch = value;
     }
-    internal TerrainStreamingPipeline TerrainPipeline => terrainStreamingPipeline ??= new TerrainStreamingPipeline(this);
-    internal VegetationStreamingController VegetationController => vegetationStreamingController ??= new VegetationStreamingController(this);
-    internal PlayerCentricSurfaceController SurfaceController => playerCentricSurfaceController ??= new PlayerCentricSurfaceController(this);
-    internal GenerationReporter Reporter => generationReporter ??= new GenerationReporter(this);
-    internal TileLoaderFrameBudgetCoordinator RuntimeFrameBudgetCoordinator => runtimeFrameBudgetCoordinator ??= new TileLoaderFrameBudgetCoordinator();
+    internal TerrainStreamingPipeline TerrainPipeline => Services.TerrainPipeline;
+    internal VegetationStreamingController VegetationController => Services.VegetationController;
+    internal PlayerCentricSurfaceController SurfaceController => Services.SurfaceController;
+    internal TileLoaderTreeOptimizationController TreeOptimizationController => Services.TreeOptimizationController;
+    internal GenerationReporter Reporter => Services.Reporter;
+    internal TileLoaderFrameBudgetCoordinator RuntimeFrameBudgetCoordinator => Services.FrameBudgetCoordinator;
+    internal TileLoaderConfiguration CurrentConfigurationInternal => CreateConfiguration();
+    internal Transform? TreeOptimizationTargetInternal
+    {
+        get => treeOptimizationTarget;
+        set => treeOptimizationTarget = value;
+    }
+    internal float FullTreeDistanceInternal => fullTreeDistance;
+    internal float ReducedTreeDistanceInternal => reducedTreeDistance;
+    internal float LowDetailTreeDistanceInternal => lowDetailTreeDistance;
+    internal TileLoaderTreeOptimizer CreateTreeOptimizerInternal() => CreateTreeOptimizer();
     internal bool IsRuntimeVegetationTileSettledInternal(Vector2Int tileCoordinate)
         => runtimeVegetationTileStatusByCoordinate.TryGetValue(tileCoordinate, out VegetationTileStreamingStatus status) &&
            status == VegetationTileStreamingStatus.Settled;
@@ -430,30 +501,18 @@ public sealed partial class TileLoader : MonoBehaviour
 
     internal void ResetRuntimeLifecycleState()
     {
-        hasLoadedInCurrentEnableCycle = false;
-        cachedTerrainSampler = null;
-        lastVegetationStreamingTargetWorldPosition = null;
-        lastCompletedRuntimeNeighborhoodCenterTileCoordinate = null;
-        runtimeVegetationTileStatusByCoordinate.Clear();
-        terrainSceneFacade ??= new TerrainSceneFacade(this);
-        terrainStreamingPipeline ??= new TerrainStreamingPipeline(this);
-        vegetationStreamingController ??= new VegetationStreamingController(this);
-        playerCentricSurfaceController ??= new PlayerCentricSurfaceController(this);
-        generationReporter ??= new GenerationReporter(this);
-        runtimeFrameBudgetCoordinator ??= new TileLoaderFrameBudgetCoordinator();
-        runtimeFrameBudgetCoordinator.Reset();
-        playerCentricSurfaceController.ResetState();
+        Services.ResetRuntimeLifecycleState();
     }
 
     internal void ResetRuntimeStreamingStateOnDisable()
     {
-        terrainPhaseLoadInProgress = false;
-        cachedTerrainSampler = null;
-        activeRuntimeRequestedTileCoordinate = null;
-        lastCompletedRuntimeNeighborhoodCenterTileCoordinate = null;
-        runtimeVegetationTileStatusByCoordinate.Clear();
-        runtimeFrameBudgetCoordinator?.Reset();
-        playerCentricSurfaceController?.ResetState();
+        if (services != null)
+        {
+            services.ResetRuntimeStreamingStateOnDisable();
+            return;
+        }
+
+        runtimeState?.ResetRuntimeStreaming();
     }
 
     internal bool ShouldLoadOnEnableInEditModeInternal() => ShouldLoadOnEnableInEditMode();
@@ -471,8 +530,9 @@ public sealed partial class TileLoader : MonoBehaviour
         ScheduleEditorTerrainSeamRebuild();
 #endif
     }
-    internal void UpdateConiferOptimizationInternal(bool forceFullIfNoTarget = false) => UpdateConiferOptimization(forceFullIfNoTarget);
-    internal void ApplyConiferOptimizationToAllInternal(ConiferOptimizationTier tier) => ApplyConiferOptimizationToAll(tier);
+    internal void UpdateTreeOptimizationInternal(bool forceFullIfNoTarget = false) => TreeOptimizationController.UpdateOptimization(forceFullIfNoTarget);
+    internal void ApplyTreeOptimizationToAllInternal(TreeOptimizationTier tier) => TreeOptimizationController.ApplyOptimizationToAll(tier);
+    internal void UpdateRuntimeTreeOptimizationInternal(bool holdAtFull) => TreeOptimizationController.UpdateRuntimeOptimization(holdAtFull);
     internal void UpdatePlayerCentricSurfaceVegetationInternal(bool forceImmediate) => UpdatePlayerCentricSurfaceVegetation(forceImmediate);
     internal void CleanupRetiredTerrainContainersInternal() => CleanupRetiredTerrainContainers();
     internal void CancelActiveVegetationPopulationInternal() => CancelActiveVegetationPopulation();
@@ -501,9 +561,8 @@ public sealed partial class TileLoader : MonoBehaviour
     internal int BeginTerrainGenerationPipelineInternal() => ++activeGenerationPipelineId;
     internal void ResetGeneratedRuntimeArtifactsInternal()
     {
-        generatedConiferInstances.Clear();
+        TreeOptimizationController.ResetState();
         generatedTerrainShadingMetadata.Clear();
-        nextConiferOptimizationTime = 0f;
     }
     internal string GetTerrainBatchWorldgenPhaseNameInternal() => UsesBatchNeighborhoodLoading() ? "3x3 batch worldgen" : "tile worldgen";
     internal TileLoaderBatchPlanner CreateBatchPlannerInternal() => CreateBatchPlanner();
@@ -1048,6 +1107,7 @@ public sealed partial class TileLoader : MonoBehaviour
     [ContextMenu("Update Terrain")]
     public void UpdateTerrain()
     {
+        Services.RefreshConfiguration();
         hasLoadedInCurrentEnableCycle = false;
         LoadTileIntoScene();
     }
@@ -1058,6 +1118,7 @@ public sealed partial class TileLoader : MonoBehaviour
 #if !GRIFFIN
         return;
 #else
+        Services.RefreshConfiguration();
         foreach (GStylizedTerrain terrain in GetGeneratedTerrains())
         {
             if (terrain == null || terrain.TerrainData == null)
@@ -1080,6 +1141,7 @@ public sealed partial class TileLoader : MonoBehaviour
         Debug.LogError("Polaris/GRIFFIN is not enabled in this project, so TileLoader cannot create terrain.", this);
         return;
 #else
+        Services.RefreshConfiguration();
         if (!Application.isPlaying && hasLoadedInCurrentEnableCycle && loadOnEnableInEditMode)
         {
             return;
@@ -1200,14 +1262,12 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private bool RefreshDynamicTileLoading()
     {
-        runtime ??= new TileLoaderRuntime(this);
-        return runtime.RefreshDynamicLoadingInternal();
+        return Runtime.RefreshDynamicLoadingInternal();
     }
 
     private void RequestDynamicTileLoad(Vector3Int tileCoordinate, bool forceImmediate = false)
     {
-        runtime ??= new TileLoaderRuntime(this);
-        runtime.RequestDynamicTileLoadProxy(this, tileCoordinate, forceImmediate);
+        Runtime.RequestDynamicTileLoadProxy(this, tileCoordinate, forceImmediate);
     }
 
     private bool TryGetDynamicLoadTargetTileCoordinate(out Vector3Int tileCoordinate)
@@ -1294,8 +1354,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private void TryDispatchQueuedDynamicLoad()
     {
-        runtime ??= new TileLoaderRuntime(this);
-        runtime.TryDispatchQueuedDynamicLoad();
+        Runtime.TryDispatchQueuedDynamicLoad();
     }
 
     private IEnumerator DispatchQueuedDynamicLoadNextFrame()
@@ -1390,8 +1449,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private Vector3Int ResolveCurrentDesiredDynamicNeighborhoodCenter(Vector3Int fallbackTileCoordinate)
     {
-        runtime ??= new TileLoaderRuntime(this);
-        return runtime.ResolveCurrentDesiredDynamicNeighborhoodCenter(fallbackTileCoordinate);
+        return Runtime.ResolveCurrentDesiredDynamicNeighborhoodCenter(fallbackTileCoordinate);
     }
 
     private int GetDynamicLoadNeighborhoodRadiusInTiles()
@@ -1401,8 +1459,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private bool IsTileCoordinateWithinDynamicNeighborhood(Vector3Int tileCoordinate, Vector3Int centerTileCoordinate)
     {
-        runtime ??= new TileLoaderRuntime(this);
-        return runtime.IsTileCoordinateWithinDynamicNeighborhood(tileCoordinate, centerTileCoordinate);
+        return Runtime.IsTileCoordinateWithinDynamicNeighborhood(tileCoordinate, centerTileCoordinate);
     }
 
     private bool IsRuntimeBatchStillRelevant(GeneratedTerrainBatchState batchState)
@@ -1457,8 +1514,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private bool TryGetUnityTileCoordinateForDynamicLoadTarget(out Vector3Int tileCoordinate)
     {
-        runtime ??= new TileLoaderRuntime(this);
-        return runtime.TryGetUnityTileCoordinateForDynamicLoadTarget(out tileCoordinate);
+        return Runtime.TryGetUnityTileCoordinateForDynamicLoadTarget(out tileCoordinate);
     }
 
     private void ScheduleRuntimeTerrainSeamRebuild()
@@ -1601,10 +1657,10 @@ public sealed partial class TileLoader : MonoBehaviour
         return loadedWorldData;
     }
 
-    private TileLoaderConfigSnapshot CreateConfigSnapshot()
+    private TileLoaderConfiguration CreateConfiguration()
     {
-        return new TileLoaderConfigSnapshot(
-            new WorldSourceConfig(
+        return new TileLoaderConfiguration(
+            new TileLoaderWorldSourceOptions(
                 worldDataFile,
                 loadOnEnableInEditMode,
                 loadOnStartInPlayMode,
@@ -1613,7 +1669,7 @@ public sealed partial class TileLoader : MonoBehaviour
                 fallbackHillSpacing,
                 fallbackHillStrength,
                 invertUnityYForWorldGen),
-            new DynamicLoadingConfig(
+            new TileLoaderDynamicLoadingOptions(
                 dynamicTileLoadingEnabled,
                 dynamicLoadTargetOverride,
                 dynamicLoadCheckIntervalSeconds,
@@ -1622,14 +1678,14 @@ public sealed partial class TileLoader : MonoBehaviour
                 reuseOverlappingDynamicNeighborhoodTiles,
                 retiredTerrainColliderGraceSeconds,
                 load3x3Neighborhood),
-            new TerrainOutputConfig(
+            new TileLoaderTerrainOptions(
                 unityTileCoordinate,
                 generatedTerrainName,
                 terrainWidth,
                 terrainLength,
                 terrainHeight,
                 terrainGridSize),
-            new VegetationConfig(
+            new TileLoaderVegetationOptions(
                 placeTreeObjects,
                 placeSurfaceObjects,
                 vegetationLoadMode,
@@ -1652,7 +1708,7 @@ public sealed partial class TileLoader : MonoBehaviour
                 midDetailPlacementRadiusMeters,
                 highDetailTerrainConformRadiusMeters,
                 grassClusterConformSurfaceOffset),
-            new RiverConfig(
+            new TileLoaderRiverOptions(
                 riverWidthMultiplier,
                 riverDepthMultiplier,
                 riverBankDepthMultiplier,
@@ -1692,18 +1748,18 @@ public sealed partial class TileLoader : MonoBehaviour
                 riverWaterSpeedMultiplier,
                 riverWaterMinSegmentLength,
                 riverWaterTangentSmoothingRadius),
-            new OptimizationConfig(
-                optimizeConifersByDistance,
-                coniferOptimizationTarget,
-                fullConiferDistance,
-                reducedConiferDistance,
-                lowDetailConiferDistance,
-                culledConiferDistance,
-                coniferOptimizationInterval,
-                disableDistantConiferColliders,
-                disableDistantConiferShadows,
-                disableDistantConiferDecals),
-            new DebugConfig(
+            new TileLoaderOptimizationOptions(
+                optimizeTreesByDistance,
+                treeOptimizationTarget,
+                fullTreeDistance,
+                reducedTreeDistance,
+                lowDetailTreeDistance,
+                culledTreeDistance,
+                treeOptimizationInterval,
+                disableDistantTreeColliders,
+                disableDistantTreeShadows,
+                disableDistantTreeDecals),
+            new TileLoaderDebugOptions(
                 logHeightStats,
                 logGenerationPhaseTimings,
                 logVegetationPlacementWorkItems));
@@ -1711,73 +1767,20 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private TerrainBuildContext CreateTerrainBuildContext()
     {
-        TileLoaderConfigSnapshot config = CreateConfigSnapshot();
-        return new TerrainBuildContext(
-            config.WorldSource.WorldDataFile,
-            config.WorldSource.UseMetadataGenerationSettings,
-            config.WorldSource.FallbackTileSize,
-            config.WorldSource.FallbackHillSpacing,
-            config.WorldSource.FallbackHillStrength,
-            config.Terrain.UnityTileCoordinate,
-            config.WorldSource.InvertUnityYForWorldGen,
+        return TileLoaderCompositionBuilder.CreateTerrainBuildContext(
+            Services.CurrentConfiguration,
             UsesBatchNeighborhoodLoading(),
-            config.DynamicLoading.Enabled,
-            config.DynamicLoading.ReuseOverlappingNeighborhoodTiles,
-            config.Terrain.Width,
-            config.Terrain.Length,
-            config.Terrain.Height,
-            config.Terrain.GridSize,
-            config.Terrain.GeneratedTerrainName,
-            config.River.WidthMultiplier,
-            config.River.DepthMultiplier,
-            config.River.BankDepthMultiplier,
-            config.River.CenterDepthMultiplier,
-            config.River.CenterDepthMultiplierAtNinetyDegrees,
-            config.River.CenterCarveWidthMultiplier,
-            config.River.CenterCarveWidthMultiplierAtNinetyDegrees,
-            config.River.ProfileMinDropMetersPerTile,
-            config.River.ProfileMaxDropMetersPerTile,
-            config.River.CorridorDepressionMeters,
-            config.River.CorridorMaxSlopeMetersPerSample,
-            config.River.CorridorRadiusMultiplier,
-            config.River.CorridorMinRadiusSamples,
-            config.River.CorridorSmoothingStrength,
-            config.River.CorridorSmoothingKernelRadius,
-            config.River.CorridorSmoothingPasses,
-            config.River.FinalSmoothingStrength,
-            config.River.FinalSmoothingKernelRadius,
-            config.River.FinalSmoothingPasses,
-            config.River.FinalSmoothingRetainedDepthFraction,
-            config.River.RiverWaterMeshVerticalOffset,
-            config.River.RiverWaterMeshVerticalOffsetAtNinetyDegrees,
-            VegetationStreamingPolicyVersion,
-            config.Vegetation.PlaceTrees,
-            config.Vegetation.PlaceSurfaceObjects);
+            VegetationStreamingPolicyVersion);
     }
 
     private RiverBuildContext CreateRiverBuildContext()
     {
-        TileLoaderConfigSnapshot config = CreateConfigSnapshot();
-        return new RiverBuildContext(
-            config.Terrain.Width,
-            config.Terrain.Length,
-            config.Terrain.Height,
-            config.Terrain.GridSize,
-            config.River.WidthMultiplier,
-            config.River.DepthMultiplier,
-            config.River.BankDepthMultiplier);
+        return TileLoaderCompositionBuilder.CreateRiverBuildContext(Services.CurrentConfiguration);
     }
 
     private VegetationBuildContext CreateVegetationBuildContext()
     {
-        TileLoaderConfigSnapshot config = CreateConfigSnapshot();
-        return new VegetationBuildContext(
-            config.Terrain.Width,
-            config.Terrain.Length,
-            config.Terrain.Height,
-            MaxTileHeightUnits,
-            config.Vegetation.SurfaceObjectVerticalOffset,
-            config.Vegetation.GrassClusterConformSurfaceOffset);
+        return TileLoaderCompositionBuilder.CreateVegetationBuildContext(Services.CurrentConfiguration, MaxTileHeightUnits);
     }
 
     private TileLoaderRiverSettings CreateRiverSettings()
@@ -1835,37 +1838,33 @@ public sealed partial class TileLoader : MonoBehaviour
         riverWaterTangentSmoothingRadius = settings.RiverWaterTangentSmoothingRadius;
     }
 
-    private ConiferOptimizationContext CreateConiferOptimizationContext()
+    private TreeOptimizationContext CreateTreeOptimizationContext()
     {
-        TileLoaderConfigSnapshot config = CreateConfigSnapshot();
-        return new ConiferOptimizationContext(
-            config.Optimization.FullConiferDistance,
-            config.Optimization.ReducedConiferDistance,
-            config.Optimization.LowDetailConiferDistance,
-            config.Optimization.CulledConiferDistance,
-            config.Optimization.DisableDistantConiferColliders,
-            config.Optimization.DisableDistantConiferShadows,
-            config.Optimization.DisableDistantConiferDecals);
+        return TileLoaderCompositionBuilder.CreateTreeOptimizationContext(Services.CurrentConfiguration);
     }
 
-    private TileLoaderConiferOptimizer CreateConiferOptimizer()
+    private TileLoaderTreeOptimizer CreateTreeOptimizer()
     {
-        return new TileLoaderConiferOptimizer(CreateConiferOptimizationContext());
+        return TileLoaderCompositionBuilder.CreateTreeOptimizer(Services.CurrentConfiguration);
     }
 
     private TileLoaderBatchPlanner CreateBatchPlanner()
     {
-        return new TileLoaderBatchPlanner(CreateTerrainBuildContext(), MetersPerTileHeightUnit);
+        return TileLoaderCompositionBuilder.CreateBatchPlanner(
+            Services.CurrentConfiguration,
+            UsesBatchNeighborhoodLoading(),
+            MetersPerTileHeightUnit,
+            VegetationStreamingPolicyVersion);
     }
 
     private TileLoaderTerrainSampler CreateTerrainSampler()
     {
-        return cachedTerrainSampler ??= new TileLoaderTerrainSampler(CreateVegetationBuildContext());
+        return Services.GetOrCreateTerrainSampler(CreateVegetationBuildContext());
     }
 
     private TileLoaderRiverBuilder CreateRiverBuilder(TileLoaderRiverSettings settings)
     {
-        return new TileLoaderRiverBuilder(settings, CreateTerrainSampler(), DefaultRiverWaterMaterialAssetPath);
+        return TileLoaderCompositionBuilder.CreateRiverBuilder(settings, CreateTerrainSampler(), DefaultRiverWaterMaterialAssetPath);
     }
 
     private void UseRiverBuilder(Action<TileLoaderRiverBuilder> action)
@@ -2026,16 +2025,19 @@ public sealed partial class TileLoader : MonoBehaviour
         GenerationSettings settings,
         int pipelineId)
     {
-        return CreateBatchPlanner().BuildBatchState(
+        GeneratedTerrainBatchCacheEntry? cachedBatch = cachedTerrainBatch;
+        GeneratedTerrainBatchState batchState = CreateBatchPlanner().BuildBatchState(
             tileGenerator,
             loadedWorldData,
             settings,
             pipelineId,
-            ref cachedTerrainBatch,
+            ref cachedBatch,
             activeGeneratedTerrainRoot != null,
             activeLoadedUnityTileCoordinate,
             activeTerrainTileCache,
             activeTerrainTileCacheSignature);
+        cachedTerrainBatch = cachedBatch;
+        return batchState;
     }
 
     private void ScheduleDeferredGenerationPhases(GeneratedTerrainBatchState batchState)
@@ -2224,9 +2226,8 @@ public sealed partial class TileLoader : MonoBehaviour
     private void ClearGeneratedTerrains()
     {
         CancelActiveVegetationPopulation();
-        generatedConiferInstances.Clear();
+        TreeOptimizationController.ResetState();
         generatedTerrainShadingMetadata.Clear();
-        nextConiferOptimizationTime = 0f;
         ClearPlayerCentricSurfaceCaches();
         lastCompletedGenerationPipelineId = 0;
         lastCompletedRuntimeNeighborhoodCenterTileCoordinate = null;
@@ -3212,7 +3213,7 @@ public sealed partial class TileLoader : MonoBehaviour
             vegetationLoadMode == VegetationLoadMode.HybridInteractive,
             vegetationInteractionRadiusMeters,
             vegetationInteractionHysteresisMeters,
-            this,
+            Services.InstancedVegetationRuntimeBudgetOwner,
             prototypeInitBudgetMsPerFrame);
         decalProjectorStream.Initialize(buildState.Prototypes, buildState.Placements);
         buildState.LastFinalizedPlacementCount = buildState.Placements.Count;
@@ -3324,7 +3325,7 @@ public sealed partial class TileLoader : MonoBehaviour
         instance.transform.localRotation = localRotation;
         if (isTreeObject)
         {
-            RegisterGeneratedConifer(instance);
+            RegisterGeneratedTree(instance);
             return true;
         }
 
@@ -3419,7 +3420,7 @@ public sealed partial class TileLoader : MonoBehaviour
                 normalizationMaxHeight,
                 treeObjectVerticalOffset);
             instance.transform.localRotation = Quaternion.identity;
-            RegisterGeneratedConifer(instance);
+            RegisterGeneratedTree(instance);
             return;
         }
 
@@ -3885,14 +3886,9 @@ public sealed partial class TileLoader : MonoBehaviour
         return TileLoaderTerrainMathUtility.Lerp(a, b, t);
     }
 
-    private void RegisterGeneratedConifer(GameObject instance)
+    private void RegisterGeneratedTree(GameObject instance)
     {
-        if (instance == null)
-        {
-            return;
-        }
-
-        generatedConiferInstances.Add(new GeneratedConiferInstance(instance));
+        TreeOptimizationController.RegisterGeneratedTree(instance);
     }
 
     private void RegisterGeneratedSurfaceObject(GameObject instance)
@@ -3947,7 +3943,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private void RegisterExistingGeneratedTreeObjects()
     {
-        generatedConiferInstances.Clear();
+        TreeOptimizationController.ResetState();
 
         foreach (Transform child in transform)
         {
@@ -3970,7 +3966,7 @@ public sealed partial class TileLoader : MonoBehaviour
                     continue;
                 }
 
-                RegisterGeneratedConifer(vegetationChild.gameObject);
+                RegisterGeneratedTree(vegetationChild.gameObject);
             }
         }
     }
@@ -4078,102 +4074,11 @@ public sealed partial class TileLoader : MonoBehaviour
                candidate.GetComponent<LODGroup>() != null;
     }
 
-    private void UpdateConiferOptimization(bool forceFullIfNoTarget = false)
-    {
-        generatedConiferInstances.RemoveAll(instance => instance.Root == null);
-        if (generatedConiferInstances.Count == 0)
-        {
-            return;
-        }
+    private void UpdateTreeOptimization(bool forceFullIfNoTarget = false)
+        => TreeOptimizationController.UpdateOptimization(forceFullIfNoTarget);
 
-        Transform? target = ResolveConiferOptimizationTarget();
-        if (target == null)
-        {
-            if (forceFullIfNoTarget)
-            {
-                ApplyConiferOptimizationToAll(ConiferOptimizationTier.Full);
-            }
-
-            return;
-        }
-
-        float fullDistanceSq = fullConiferDistance * fullConiferDistance;
-        float reducedDistanceSq = reducedConiferDistance * reducedConiferDistance;
-        float lowDetailDistanceSq = lowDetailConiferDistance * lowDetailConiferDistance;
-
-        for (int i = 0; i < generatedConiferInstances.Count; i++)
-        {
-            GeneratedConiferInstance instance = generatedConiferInstances[i];
-            float sqrDistance = (instance.Transform.position - target.position).sqrMagnitude;
-            ConiferOptimizationTier tier = DetermineConiferTier(
-                sqrDistance,
-                fullDistanceSq,
-                reducedDistanceSq,
-                lowDetailDistanceSq);
-            ApplyConiferOptimization(instance, tier);
-        }
-    }
-
-    private void ApplyConiferOptimizationToAll(ConiferOptimizationTier tier)
-    {
-        generatedConiferInstances.RemoveAll(instance => instance.Root == null);
-        CreateConiferOptimizer().ApplyOptimizationToAll(generatedConiferInstances, tier);
-    }
-
-    private ConiferOptimizationTier DetermineConiferTier(
-        float sqrDistance,
-        float fullDistanceSq,
-        float reducedDistanceSq,
-        float lowDetailDistanceSq)
-    {
-        return CreateConiferOptimizer().DetermineTier(
-            sqrDistance,
-            fullDistanceSq,
-            reducedDistanceSq,
-            lowDetailDistanceSq);
-    }
-
-    private void ApplyConiferOptimization(GeneratedConiferInstance instance, ConiferOptimizationTier tier)
-    {
-        CreateConiferOptimizer().ApplyOptimization(instance, tier);
-    }
-
-    private Transform? ResolveConiferOptimizationTarget()
-    {
-        if (coniferOptimizationTarget != null && coniferOptimizationTarget.gameObject.scene.IsValid())
-        {
-            return coniferOptimizationTarget;
-        }
-
-        if (TryFindSceneTransformWithComponent("CharacterLocomotion", out Transform? locomotionTransform))
-        {
-            coniferOptimizationTarget = locomotionTransform;
-            return coniferOptimizationTarget;
-        }
-
-        if (TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
-        {
-            coniferOptimizationTarget = taggedPlayerTransform;
-            return coniferOptimizationTarget;
-        }
-
-        if (Camera.main != null)
-        {
-            return Camera.main.transform;
-        }
-
-        return null;
-    }
-
-    private static bool TryFindSceneTransformWithComponent(string componentTypeName, out Transform? result)
-    {
-        return TileLoaderConiferOptimizer.TryFindSceneTransformWithComponent(componentTypeName, out result);
-    }
-
-    private static bool TryFindSceneTransformWithTag(string tagName, out Transform? result)
-    {
-        return TileLoaderConiferOptimizer.TryFindSceneTransformWithTag(tagName, out result);
-    }
+    private void ApplyTreeOptimizationToAll(TreeOptimizationTier tier)
+        => TreeOptimizationController.ApplyOptimizationToAll(tier);
 
     private int GetGeneratedTerrainGroupId()
     {
@@ -4218,11 +4123,11 @@ public sealed partial class TileLoader : MonoBehaviour
             generatedVegetationContainerName = "Vegetation";
         }
 
-        fullConiferDistance = Mathf.Max(0f, fullConiferDistance);
-        reducedConiferDistance = Mathf.Max(fullConiferDistance, reducedConiferDistance);
-        lowDetailConiferDistance = Mathf.Max(reducedConiferDistance, lowDetailConiferDistance);
-        culledConiferDistance = Mathf.Max(lowDetailConiferDistance, culledConiferDistance);
-        coniferOptimizationInterval = Mathf.Max(0.05f, coniferOptimizationInterval);
+        fullTreeDistance = Mathf.Max(0f, fullTreeDistance);
+        reducedTreeDistance = Mathf.Max(fullTreeDistance, reducedTreeDistance);
+        lowDetailTreeDistance = Mathf.Max(reducedTreeDistance, lowDetailTreeDistance);
+        culledTreeDistance = Mathf.Max(lowDetailTreeDistance, culledTreeDistance);
+        treeOptimizationInterval = Mathf.Max(0.05f, treeOptimizationInterval);
         vegetationInteractionRadiusMeters = Mathf.Max(0f, vegetationInteractionRadiusMeters);
         vegetationInteractionHysteresisMeters = Mathf.Max(0f, vegetationInteractionHysteresisMeters);
     }
@@ -4264,4 +4169,6 @@ public sealed partial class TileLoader : MonoBehaviour
     {
         return TileLoaderWorldDataUtility.ResolveWorldDataFilePath(configuredPath);
     }
+}
+
 }

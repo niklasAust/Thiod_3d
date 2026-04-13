@@ -1,0 +1,23 @@
+{
+  "name": "Thiod.TileLoading.Runtime",
+  "rootNamespace": "Thiod.TileLoading.Runtime",
+  "references": [
+    "Pinwheel.Polaris.Runtime",
+    "Pinwheel.PolarisAPI",
+    "Thiod.WorldGen.Runtime",
+    "Opsive.Shared.Runtime",
+    "Opsive.UltimateCharacterController",
+    "Unity.Mathematics",
+    "Unity.Splines",
+    "Unity.RenderPipelines.Universal.Runtime"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

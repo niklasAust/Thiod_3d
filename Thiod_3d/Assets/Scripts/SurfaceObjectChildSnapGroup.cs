@@ -5,6 +5,9 @@ using UnityEngine;
 using UnityEditor;
 #endif
 
+namespace Thiod.TileLoading.Runtime
+{
+
 [ExecuteAlways]
 [DisallowMultipleComponent]
 [AddComponentMenu("Environment/Surface Object Child Snap Group")]
@@ -257,4 +260,6 @@ public sealed class SurfaceObjectChildSnapGroup : MonoBehaviour
         public Quaternion LocalRotation;
         public Vector3 LocalScale;
     }
+}
+
 }

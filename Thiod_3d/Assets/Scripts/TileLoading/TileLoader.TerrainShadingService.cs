@@ -11,6 +11,9 @@ using Pinwheel.Griffin.API;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 [Flags]
 internal enum TileLoaderTerrainSeamMask
 {
@@ -882,4 +885,6 @@ internal sealed class TileLoaderTerrainShadingService
 
         return material;
     }
+}
+
 }

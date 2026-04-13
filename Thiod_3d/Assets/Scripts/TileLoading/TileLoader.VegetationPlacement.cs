@@ -10,9 +10,175 @@ using Pinwheel.Griffin;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 public sealed partial class TileLoader : MonoBehaviour
 {
+    private TileLoaderVegetationPlacementService? vegetationPlacementService;
+    private TileLoaderVegetationPlacementService VegetationPlacementService
+        => vegetationPlacementService ??= new TileLoaderVegetationPlacementService(this);
+
+    internal float TreeObjectVerticalOffsetInternal => treeObjectVerticalOffset;
+    internal float HighDetailPlacementRadiusMetersInternal => highDetailPlacementRadiusMeters;
+    internal float MidDetailPlacementRadiusMetersInternal => midDetailPlacementRadiusMeters;
+    internal float HighDetailTerrainConformRadiusMetersInternal => highDetailTerrainConformRadiusMeters;
+    internal bool CenterTileOnlyNonTreeBudgetFirstInternal => centerTileOnlyNonTreeBudgetFirst;
+    internal Vector3 GetTerrainLocalPointFromHeightmapApproxInternal(
+        double[,] heightmap,
+        double normalizedX,
+        double normalizedY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight,
+        float verticalOffset)
+        => GetTerrainLocalPointFromHeightmapApprox(
+            heightmap,
+            normalizedX,
+            normalizedY,
+            normalizationMinHeight,
+            normalizationMaxHeight,
+            verticalOffset);
+    internal Vector3 GetTerrainLocalNormalFromHeightmapApproxInternal(
+        double[,] heightmap,
+        double normalizedX,
+        double normalizedY,
+        double normalizationMinHeight,
+        double normalizationMaxHeight)
+        => GetTerrainLocalNormalFromHeightmapApprox(
+            heightmap,
+            normalizedX,
+            normalizedY,
+            normalizationMinHeight,
+            normalizationMaxHeight);
+    internal bool RequiresInstancingOnlyInternal(TileObjectPlacement placement) => RequiresInstancingOnly(placement);
+    internal bool TryBuildInstancedPlacementInternal(
+        HybridVegetationBuildState buildState,
+        VegetationTileStreamingStats? tileStats,
+        VegetationWorkItem? workItem,
+        PreparedVegetationPlacement preparedPlacement,
+        TileLoaderInstancedVegetationPrototype prototype,
+        out TileLoaderInstancedVegetationPlacement instancedPlacement)
+        => TryBuildInstancedPlacement(
+            buildState,
+            tileStats,
+            workItem,
+            preparedPlacement,
+            prototype,
+            out instancedPlacement);
+    internal bool InstantiatePreparedLegacyPlacementInternal(
+        HybridVegetationBuildState buildState,
+        VegetationTileStreamingStats? tileStats,
+        VegetationWorkItem? workItem,
+        PreparedVegetationPlacement preparedPlacement,
+        GameObject prefab,
+        bool isTreeObject,
+        Transform vegetationContainer)
+        => InstantiatePreparedLegacyPlacement(
+            buildState,
+            tileStats,
+            workItem,
+            preparedPlacement,
+            prefab,
+            isTreeObject,
+            vegetationContainer);
+    internal Transform GetOrCreateVegetationBuildContainerInternal(HybridVegetationBuildState buildState)
+        => GetOrCreateVegetationBuildContainer(buildState);
+
     private List<PreparedVegetationPlacement> PrepareVegetationPlacementsForRequest(
+        GeneratedTerrainBatchState batchState,
+        Stopwatch totalStopwatch,
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request)
+        => VegetationPlacementService.PrepareVegetationPlacementsForRequest(batchState, totalStopwatch, terrain, request);
+
+    private bool ProcessPreparedHybridVegetationPlacement(
+        VegetationWorkItem workItem,
+        PreparedVegetationPlacement preparedPlacement)
+        => VegetationPlacementService.ProcessPreparedHybridVegetationPlacement(workItem, preparedPlacement);
+
+    private VegetationTileStreamingStats GetOrCreateVegetationTileStats(
+        GeneratedTerrainBatchState batchState,
+        Vector2Int tileCoordinate,
+        bool isCenterTile)
+        => VegetationPlacementService.GetOrCreateVegetationTileStats(batchState, tileCoordinate, isCenterTile);
+
+    private bool TryBuildPreparedPlacementGeometry(
+        GeneratedTerrainBatchState batchState,
+        VegetationTileStreamingStats? tileStats,
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        TileObjectPlacement placement,
+        bool isTreePlacement,
+        bool enforceCurrentStreamingDistance,
+        out PreparedPlacementGeometry geometry)
+        => VegetationPlacementService.TryBuildPreparedPlacementGeometry(
+            batchState,
+            tileStats,
+            terrain,
+            request,
+            placement,
+            isTreePlacement,
+            enforceCurrentStreamingDistance,
+            out geometry);
+
+    private void PopulatePreparedPlacementGeometryNormals(
+        GeneratedTerrainBatchState batchState,
+        VegetationTileStreamingStats? tileStats,
+        GeneratedTerrainRequest request,
+        List<PreparedVegetationPlacement> preparedPlacements)
+        => VegetationPlacementService.PopulatePreparedPlacementGeometryNormals(
+            batchState,
+            tileStats,
+            request,
+            preparedPlacements);
+
+    private void RecordPlacementPhaseTiming(
+        GeneratedTerrainBatchState? batchState,
+        VegetationTileStreamingStats? tileStats,
+        double elapsedMilliseconds,
+        VegetationPlacementPhase placementPhase,
+        VegetationWorkItem? workItem = null)
+        => VegetationPlacementService.RecordPlacementPhaseTiming(
+            batchState,
+            tileStats,
+            elapsedMilliseconds,
+            placementPhase,
+            workItem);
+
+    private Vector3? ResolveVegetationStreamingTargetWorldPosition()
+        => VegetationPlacementService.ResolveVegetationStreamingTargetWorldPosition();
+
+    private static ulong ComputeStablePlacementHash(GeneratedTerrainRequest request, TileObjectPlacement placement)
+        => TileLoaderVegetationPlacementService.ComputeStablePlacementHash(request, placement);
+
+    internal bool IsTreeCoupledSurfacePlacementInternal(TileObjectPlacement placement)
+        => IsTreeCoupledSurfacePlacement(placement);
+
+    private bool IsTreeCoupledSurfacePlacement(TileObjectPlacement placement)
+        => VegetationPlacementService.IsTreeCoupledSurfacePlacement(placement);
+
+    private static void RecordVegetationSampleCounts(
+        GeneratedTerrainBatchState? batchState,
+        VegetationTileStreamingStats? tileStats,
+        int heightmapSamples,
+        int raycastSamples)
+        => TileLoaderVegetationPlacementService.RecordVegetationSampleCounts(
+            batchState,
+            tileStats,
+            heightmapSamples,
+            raycastSamples);
+}
+
+internal sealed class TileLoaderVegetationPlacementService
+{
+    private readonly TileLoader owner;
+
+    public TileLoaderVegetationPlacementService(TileLoader owner)
+    {
+        this.owner = owner;
+    }
+
+    public List<PreparedVegetationPlacement> PrepareVegetationPlacementsForRequest(
         GeneratedTerrainBatchState batchState,
         Stopwatch totalStopwatch,
         GStylizedTerrain terrain,
@@ -20,7 +186,7 @@ public sealed partial class TileLoader : MonoBehaviour
     {
         var preparedPlacements = new List<PreparedVegetationPlacement>();
         var cappedPlacements = new Dictionary<int, List<PreparedVegetationPlacement>>();
-        Vector2Int tileCoordinate = GetTileCoordinate(request);
+        Vector2Int tileCoordinate = owner.GetTileCoordinateInternal(request);
         bool isCenterTile = tileCoordinate == new Vector2Int(batchState.CenterTileCoordinate.x, batchState.CenterTileCoordinate.y);
         VegetationTileStreamingStats tileStats = GetOrCreateVegetationTileStats(batchState, tileCoordinate, isCenterTile);
         IReadOnlyList<TileObjectPlacement> placedObjects = request.Layers.PlacedObjects ?? Array.Empty<TileObjectPlacement>();
@@ -48,12 +214,12 @@ public sealed partial class TileLoader : MonoBehaviour
             batchState.VegetationGeneratedPlacementCount++;
 
             string? vegetationCategory = placement.Definition.VegetationCategory;
-            if (!placeTreeObjects && string.Equals(vegetationCategory, "tree", StringComparison.OrdinalIgnoreCase))
+            if (!owner.PlaceTreeObjectsInternal && string.Equals(vegetationCategory, "tree", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            if (!placeSurfaceObjects &&
+            if (!owner.PlaceSurfaceObjectsInternal &&
                 !string.IsNullOrWhiteSpace(vegetationCategory) &&
                 !string.Equals(vegetationCategory, "tree", StringComparison.OrdinalIgnoreCase))
             {
@@ -210,7 +376,7 @@ public sealed partial class TileLoader : MonoBehaviour
         return preparedPlacements;
     }
 
-    private bool ProcessPreparedHybridVegetationPlacement(
+    public bool ProcessPreparedHybridVegetationPlacement(
         VegetationWorkItem workItem,
         PreparedVegetationPlacement preparedPlacement)
     {
@@ -221,12 +387,12 @@ public sealed partial class TileLoader : MonoBehaviour
         {
             tileStats = GetOrCreateVegetationTileStats(
                 buildState.BatchState,
-                GetTileCoordinate(buildState.Request),
+                owner.GetTileCoordinateInternal(buildState.Request),
                 preparedPlacement.IsCenterTile);
         }
 
         var phaseStopwatch = Stopwatch.StartNew();
-        GameObject? prefab = LoadPrefabForPlacement(placement, buildState.BatchState);
+        GameObject? prefab = owner.LoadPrefabForPlacementInternal(placement, buildState.BatchState);
         phaseStopwatch.Stop();
         RecordPlacementPhaseTiming(
             buildState.BatchState,
@@ -241,21 +407,21 @@ public sealed partial class TileLoader : MonoBehaviour
             return false;
         }
 
-        bool isTreeObject = IsTreePlacement(placement, prefab);
-        if (isTreeObject && !placeTreeObjects)
+        bool isTreeObject = owner.IsTreePlacementInternal(placement, prefab);
+        if (isTreeObject && !owner.PlaceTreeObjectsInternal)
         {
             return false;
         }
 
-        if (!isTreeObject && !placeSurfaceObjects)
+        if (!isTreeObject && !owner.PlaceSurfaceObjectsInternal)
         {
             return false;
         }
 
-        bool requiresInstancingOnly = preparedPlacement.ForceInstancingOnly || RequiresInstancingOnly(placement);
-        bool supportsPromotion = !preparedPlacement.ForceInstancingOnly && SupportsHybridPromotion(placement);
+        bool requiresInstancingOnly = preparedPlacement.ForceInstancingOnly || owner.RequiresInstancingOnlyInternal(placement);
+        bool supportsPromotion = !preparedPlacement.ForceInstancingOnly && owner.SupportsHybridPromotionInternal(placement);
         phaseStopwatch.Restart();
-        TileLoaderInstancedVegetationPrototype? prototype = GetOrCreateVegetationPrototype(
+        TileLoaderInstancedVegetationPrototype? prototype = owner.GetOrCreateVegetationPrototypeInternal(
             buildState.BatchState,
             placement,
             prefab,
@@ -269,7 +435,7 @@ public sealed partial class TileLoader : MonoBehaviour
             VegetationPlacementPhase.PrototypeResolve,
             workItem);
         if (prototype != null &&
-            TryBuildInstancedPlacement(
+            owner.TryBuildInstancedPlacementInternal(
                 buildState,
                 tileStats,
                 workItem,
@@ -277,7 +443,7 @@ public sealed partial class TileLoader : MonoBehaviour
                 prototype,
                 out TileLoaderInstancedVegetationPlacement instancedPlacement))
         {
-            buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
+            buildState.VegetationContainer ??= owner.GetOrCreateVegetationBuildContainerInternal(buildState);
             if (!buildState.PrototypeIndices.TryGetValue(prototype.Key, out int prototypeIndex))
             {
                 prototypeIndex = buildState.Prototypes.Count;
@@ -309,13 +475,13 @@ public sealed partial class TileLoader : MonoBehaviour
             return false;
         }
 
-        if (vegetationLoadMode == VegetationLoadMode.InstancesOnly || requiresInstancingOnly)
+        if (owner.VegetationLoadModeInternal == VegetationLoadMode.InstancesOnly || requiresInstancingOnly)
         {
             return false;
         }
 
-        buildState.VegetationContainer ??= GetOrCreateVegetationBuildContainer(buildState);
-        bool instantiated = InstantiatePreparedLegacyPlacement(
+        buildState.VegetationContainer ??= owner.GetOrCreateVegetationBuildContainerInternal(buildState);
+        bool instantiated = owner.InstantiatePreparedLegacyPlacementInternal(
             buildState,
             tileStats,
             workItem,
@@ -338,7 +504,7 @@ public sealed partial class TileLoader : MonoBehaviour
                buildState.VegetationContainer.gameObject.activeInHierarchy;
     }
 
-    private VegetationTileStreamingStats GetOrCreateVegetationTileStats(
+    public VegetationTileStreamingStats GetOrCreateVegetationTileStats(
         GeneratedTerrainBatchState batchState,
         Vector2Int tileCoordinate,
         bool isCenterTile)
@@ -351,6 +517,320 @@ public sealed partial class TileLoader : MonoBehaviour
         var created = new VegetationTileStreamingStats(tileCoordinate, isCenterTile);
         batchState.VegetationTileStats[tileCoordinate] = created;
         return created;
+    }
+
+    public bool TryBuildPreparedPlacementGeometry(
+        GeneratedTerrainBatchState batchState,
+        VegetationTileStreamingStats? tileStats,
+        GStylizedTerrain terrain,
+        GeneratedTerrainRequest request,
+        TileObjectPlacement placement,
+        bool isTreePlacement,
+        bool enforceCurrentStreamingDistance,
+        out PreparedPlacementGeometry geometry)
+    {
+        geometry = default;
+        bool treatAsTreeLikePlacement = isTreePlacement || IsTreeCoupledSurfacePlacement(placement);
+        double[,] heightmap = request.Layers.Heightmap;
+        Vector3 localPosition = owner.GetTerrainLocalPointFromHeightmapApproxInternal(
+            heightmap,
+            placement.X,
+            placement.Y,
+            batchState.NormalizationMinHeight,
+            batchState.NormalizationMaxHeight,
+            treatAsTreeLikePlacement ? owner.TreeObjectVerticalOffsetInternal : owner.SurfaceObjectVerticalOffsetInternal);
+        RecordVegetationSampleCounts(batchState, tileStats, 1, 0);
+
+        Vector3 worldPosition = terrain.transform.TransformPoint(localPosition);
+        float distanceToTargetSq = 0f;
+        VegetationDensityZone densityZone = VegetationDensityZone.High;
+        Vector3? targetWorldPosition = batchState.VegetationStreamingTargetWorldPosition;
+        if (owner.IsPlayingInternal && targetWorldPosition.HasValue)
+        {
+            distanceToTargetSq = (worldPosition - targetWorldPosition.Value).sqrMagnitude;
+            float? loadDistanceMeters = placement.Definition.LoadDistanceMeters;
+            if (enforceCurrentStreamingDistance &&
+                loadDistanceMeters.HasValue &&
+                loadDistanceMeters.Value > 0f)
+            {
+                float maxDistanceSq = loadDistanceMeters.Value * loadDistanceMeters.Value;
+                if (distanceToTargetSq > maxDistanceSq)
+                {
+                    return false;
+                }
+            }
+
+            densityZone = enforceCurrentStreamingDistance
+                ? ResolveVegetationDensityZone(distanceToTargetSq, placement.Definition.StreamingTier, treatAsTreeLikePlacement)
+                : VegetationDensityZone.High;
+        }
+
+        bool isSeamRiskPlacement = IsSeamRiskPlacement(localPosition);
+        bool useExactTerrainConformOnLoad =
+            ShouldUseExactTerrainConformOnLoad(distanceToTargetSq) ||
+            isSeamRiskPlacement;
+        bool useExactTerrainConformOnPromotion = owner.SupportsHybridPromotionInternal(placement);
+        geometry = new PreparedPlacementGeometry(
+            localPosition,
+            Vector3.up,
+            worldPosition,
+            distanceToTargetSq,
+            densityZone,
+            isSeamRiskPlacement,
+            useExactTerrainConformOnLoad,
+            useExactTerrainConformOnPromotion);
+        return true;
+    }
+
+    public void PopulatePreparedPlacementGeometryNormals(
+        GeneratedTerrainBatchState batchState,
+        VegetationTileStreamingStats? tileStats,
+        GeneratedTerrainRequest request,
+        List<PreparedVegetationPlacement> preparedPlacements)
+    {
+        if (preparedPlacements.Count == 0)
+        {
+            return;
+        }
+
+        double[,] heightmap = request.Layers.Heightmap;
+        for (int placementIndex = 0; placementIndex < preparedPlacements.Count; placementIndex++)
+        {
+            PreparedVegetationPlacement preparedPlacement = preparedPlacements[placementIndex];
+            if (string.Equals(
+                    preparedPlacement.Placement.Definition.VegetationCategory,
+                    "tree",
+                    StringComparison.OrdinalIgnoreCase) ||
+                preparedPlacement.Geometry.UseExactTerrainConformOnLoad)
+            {
+                continue;
+            }
+
+            Vector3 localNormal = owner.GetTerrainLocalNormalFromHeightmapApproxInternal(
+                heightmap,
+                preparedPlacement.Placement.X,
+                preparedPlacement.Placement.Y,
+                batchState.NormalizationMinHeight,
+                batchState.NormalizationMaxHeight);
+            RecordVegetationSampleCounts(batchState, tileStats, 4, 0);
+            preparedPlacements[placementIndex] = preparedPlacement.WithGeometry(preparedPlacement.Geometry.WithLocalNormal(localNormal));
+        }
+    }
+
+    public void RecordPlacementPhaseTiming(
+        GeneratedTerrainBatchState? batchState,
+        VegetationTileStreamingStats? tileStats,
+        double elapsedMilliseconds,
+        VegetationPlacementPhase placementPhase,
+        VegetationWorkItem? workItem = null)
+    {
+        if (elapsedMilliseconds <= 0d)
+        {
+            return;
+        }
+
+        tileStats?.RecordPlacementCpu(elapsedMilliseconds);
+        tileStats?.RecordPlacementPhase(elapsedMilliseconds, placementPhase);
+        workItem?.RecordPlacementPhase(elapsedMilliseconds, placementPhase);
+        if (batchState == null)
+        {
+            return;
+        }
+
+        batchState.VegetationPlacementCpuMilliseconds += elapsedMilliseconds;
+        switch (placementPhase)
+        {
+            case VegetationPlacementPhase.PrefabResolve:
+                batchState.VegetationPrefabResolveMilliseconds += elapsedMilliseconds;
+                break;
+            case VegetationPlacementPhase.PrototypeResolve:
+                batchState.VegetationPrototypeResolveMilliseconds += elapsedMilliseconds;
+                break;
+            case VegetationPlacementPhase.PositionBuild:
+                batchState.VegetationPositionBuildMilliseconds += elapsedMilliseconds;
+                break;
+            case VegetationPlacementPhase.NormalBuild:
+                batchState.VegetationNormalBuildMilliseconds += elapsedMilliseconds;
+                break;
+            case VegetationPlacementPhase.RendererFinalize:
+                batchState.VegetationRendererFinalizeMilliseconds += elapsedMilliseconds;
+                break;
+        }
+    }
+
+    public Vector3? ResolveVegetationStreamingTargetWorldPosition()
+    {
+        if (!owner.IsPlayingInternal)
+        {
+            return null;
+        }
+
+        Transform? target = ResolveVegetationStreamingTarget();
+        return target != null ? target.position : null;
+    }
+
+    public bool IsTreeCoupledSurfacePlacement(TileObjectPlacement placement)
+    {
+        if (placement.PlacementType != VegetationPlacementType.Near ||
+            !IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier) ||
+            !placement.PlacementTargetObjectId.HasValue ||
+            !TileObjectRegistry.TryGet(placement.PlacementTargetObjectId.Value, out TileObjectDefinition targetDefinition))
+        {
+            return false;
+        }
+
+        return string.Equals(
+            targetDefinition.VegetationCategory,
+            "tree",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static ulong ComputeStablePlacementHash(GeneratedTerrainRequest request, TileObjectPlacement placement)
+    {
+        ulong hash = 1469598103934665603UL;
+        AppendHash(ref hash, unchecked((ulong)request.UnityTileX));
+        AppendHash(ref hash, unchecked((ulong)request.UnityTileY));
+        AppendHash(ref hash, unchecked((ulong)placement.Definition.NumericId));
+        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.X, 4))));
+        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.Y, 4))));
+        AppendHash(ref hash, unchecked((ulong)placement.PlacementType));
+        AppendHash(ref hash, unchecked((ulong)(placement.PlacementTargetObjectId ?? 0)));
+        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.PlacementMaxDistance ?? 0d, 4))));
+        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.PlacementBias ?? 0d, 4))));
+
+        string? rawPath = placement.PrefabPath ?? placement.Definition.PrefabPath;
+        if (!string.IsNullOrWhiteSpace(rawPath))
+        {
+            for (int i = 0; i < rawPath.Length; i++)
+            {
+                AppendHash(ref hash, rawPath[i]);
+            }
+        }
+
+        return hash;
+    }
+
+    private bool ShouldUsePlayerCentricSurfaceVegetation()
+    {
+        return owner.IsPlayingInternal &&
+               owner.PlayerCentricSurfaceVegetationEnabledInternal &&
+               owner.PlaceSurfaceObjectsInternal;
+    }
+
+    private bool ShouldUseExactTerrainConformOnLoad(float distanceToTargetSq)
+    {
+        if (!owner.IsPlayingInternal)
+        {
+            return true;
+        }
+
+        float exactConformRadius = Mathf.Max(0f, owner.HighDetailTerrainConformRadiusMetersInternal);
+        return exactConformRadius <= 0f || distanceToTargetSq <= exactConformRadius * exactConformRadius;
+    }
+
+    private bool IsSeamRiskPlacement(Vector3 localPosition)
+    {
+        float seamRiskMargin = ResolveTerrainSeamRiskMarginMeters();
+        if (seamRiskMargin <= 0f)
+        {
+            return false;
+        }
+
+        float maxX = Mathf.Max(0f, owner.TerrainWidthInternal);
+        float maxZ = Mathf.Max(0f, owner.TerrainLengthInternal);
+        return localPosition.x <= seamRiskMargin ||
+               localPosition.z <= seamRiskMargin ||
+               localPosition.x >= maxX - seamRiskMargin ||
+               localPosition.z >= maxZ - seamRiskMargin;
+    }
+
+    private float ResolveTerrainSeamRiskMarginMeters()
+    {
+        float terrainExtent = Mathf.Min(Mathf.Max(0f, owner.TerrainWidthInternal), Mathf.Max(0f, owner.TerrainLengthInternal));
+        if (terrainExtent <= 0f)
+        {
+            return 0f;
+        }
+
+        return Mathf.Clamp(terrainExtent * 0.08f, 2f, 12f);
+    }
+
+    private VegetationDensityZone ResolveVegetationDensityZone(
+        float distanceToTargetSq,
+        TileObjectStreamingTier streamingTier,
+        bool treatAsTreeLikePlacement)
+    {
+        if (!owner.IsPlayingInternal)
+        {
+            return VegetationDensityZone.High;
+        }
+
+        float highRadius = Mathf.Max(0f, owner.HighDetailPlacementRadiusMetersInternal);
+        float midRadius = Mathf.Max(highRadius, owner.MidDetailPlacementRadiusMetersInternal);
+        float highRadiusSq = highRadius * highRadius;
+        float midRadiusSq = midRadius * midRadius;
+        if (distanceToTargetSq <= highRadiusSq)
+        {
+            return VegetationDensityZone.High;
+        }
+
+        if (distanceToTargetSq > midRadiusSq)
+        {
+            return VegetationDensityZone.Outer;
+        }
+
+        if (treatAsTreeLikePlacement)
+        {
+            return VegetationDensityZone.Mid;
+        }
+
+        return streamingTier == TileObjectStreamingTier.Ground ||
+               streamingTier == TileObjectStreamingTier.Clutter
+            ? VegetationDensityZone.Outer
+            : VegetationDensityZone.Mid;
+    }
+
+    private VegetationPriorityBucket DeterminePriorityBucket(
+        bool isCenterTile,
+        bool nearPlayerPriority,
+        TileObjectStreamingTier streamingTier,
+        bool isTreeCoupledSurfacePlacement)
+    {
+        if (isTreeCoupledSurfacePlacement)
+        {
+            return isCenterTile || nearPlayerPriority
+                ? VegetationPriorityBucket.CenterCanopyAndLarge
+                : VegetationPriorityBucket.OuterCanopyAndLarge;
+        }
+
+        bool treatAsCenterPriority = streamingTier == TileObjectStreamingTier.Canopy ||
+                                     streamingTier == TileObjectStreamingTier.Large
+            ? isCenterTile || nearPlayerPriority
+            : nearPlayerPriority;
+        if (streamingTier == TileObjectStreamingTier.Ground)
+        {
+            return treatAsCenterPriority
+                ? VegetationPriorityBucket.CenterClutterAndGround
+                : VegetationPriorityBucket.OuterGroundAndDebris;
+        }
+
+        if (streamingTier == TileObjectStreamingTier.Clutter)
+        {
+            if (!owner.CenterTileOnlyNonTreeBudgetFirstInternal)
+            {
+                return treatAsCenterPriority
+                    ? VegetationPriorityBucket.CenterClutterAndGround
+                    : VegetationPriorityBucket.OuterClutter;
+            }
+
+            return treatAsCenterPriority
+                ? VegetationPriorityBucket.CenterClutterAndGround
+                : VegetationPriorityBucket.OuterClutter;
+        }
+
+        return treatAsCenterPriority
+            ? VegetationPriorityBucket.CenterCanopyAndLarge
+            : VegetationPriorityBucket.OuterCanopyAndLarge;
     }
 
     private static string GetPlacementCategoryName(TileObjectPlacement placement)
@@ -404,178 +884,6 @@ public sealed partial class TileLoader : MonoBehaviour
         return left.StableHash.CompareTo(right.StableHash);
     }
 
-    private bool TryBuildPreparedPlacementGeometry(
-        GeneratedTerrainBatchState batchState,
-        VegetationTileStreamingStats? tileStats,
-        GStylizedTerrain terrain,
-        GeneratedTerrainRequest request,
-        TileObjectPlacement placement,
-        bool isTreePlacement,
-        bool enforceCurrentStreamingDistance,
-        out PreparedPlacementGeometry geometry)
-    {
-        geometry = default;
-        bool treatAsTreeLikePlacement = isTreePlacement || IsTreeCoupledSurfacePlacement(placement);
-        double[,] heightmap = request.Layers.Heightmap;
-        Vector3 localPosition = GetTerrainLocalPointFromHeightmapApprox(
-            heightmap,
-            placement.X,
-            placement.Y,
-            batchState.NormalizationMinHeight,
-            batchState.NormalizationMaxHeight,
-            treatAsTreeLikePlacement ? treeObjectVerticalOffset : surfaceObjectVerticalOffset);
-        RecordVegetationSampleCounts(batchState, tileStats, 1, 0);
-
-        Vector3 worldPosition = terrain.transform.TransformPoint(localPosition);
-        float distanceToTargetSq = 0f;
-        VegetationDensityZone densityZone = VegetationDensityZone.High;
-        Vector3? targetWorldPosition = batchState.VegetationStreamingTargetWorldPosition;
-        if (Application.isPlaying && targetWorldPosition.HasValue)
-        {
-            distanceToTargetSq = (worldPosition - targetWorldPosition.Value).sqrMagnitude;
-            float? loadDistanceMeters = placement.Definition.LoadDistanceMeters;
-            if (enforceCurrentStreamingDistance &&
-                loadDistanceMeters.HasValue &&
-                loadDistanceMeters.Value > 0f)
-            {
-                float maxDistanceSq = loadDistanceMeters.Value * loadDistanceMeters.Value;
-                if (distanceToTargetSq > maxDistanceSq)
-                {
-                    return false;
-                }
-            }
-
-            densityZone = enforceCurrentStreamingDistance
-                ? ResolveVegetationDensityZone(distanceToTargetSq, placement.Definition.StreamingTier, treatAsTreeLikePlacement)
-                : VegetationDensityZone.High;
-        }
-
-        bool isSeamRiskPlacement = IsSeamRiskPlacement(localPosition);
-        bool useExactTerrainConformOnLoad =
-            ShouldUseExactTerrainConformOnLoad(distanceToTargetSq) ||
-            isSeamRiskPlacement;
-        bool useExactTerrainConformOnPromotion =
-            SupportsHybridPromotion(placement);
-        geometry = new PreparedPlacementGeometry(
-            localPosition,
-            Vector3.up,
-            worldPosition,
-            distanceToTargetSq,
-            densityZone,
-            isSeamRiskPlacement,
-            useExactTerrainConformOnLoad,
-            useExactTerrainConformOnPromotion);
-        return true;
-    }
-
-    private void PopulatePreparedPlacementGeometryNormals(
-        GeneratedTerrainBatchState batchState,
-        VegetationTileStreamingStats? tileStats,
-        GeneratedTerrainRequest request,
-        List<PreparedVegetationPlacement> preparedPlacements)
-    {
-        if (preparedPlacements.Count == 0)
-        {
-            return;
-        }
-
-        double[,] heightmap = request.Layers.Heightmap;
-        for (int placementIndex = 0; placementIndex < preparedPlacements.Count; placementIndex++)
-        {
-            PreparedVegetationPlacement preparedPlacement = preparedPlacements[placementIndex];
-            if (string.Equals(
-                    preparedPlacement.Placement.Definition.VegetationCategory,
-                    "tree",
-                    StringComparison.OrdinalIgnoreCase) ||
-                preparedPlacement.Geometry.UseExactTerrainConformOnLoad)
-            {
-                continue;
-            }
-
-            Vector3 localNormal = GetTerrainLocalNormalFromHeightmapApprox(
-                heightmap,
-                preparedPlacement.Placement.X,
-                preparedPlacement.Placement.Y,
-                batchState.NormalizationMinHeight,
-                batchState.NormalizationMaxHeight);
-            RecordVegetationSampleCounts(batchState, tileStats, 4, 0);
-            preparedPlacements[placementIndex] = preparedPlacement.WithGeometry(preparedPlacement.Geometry.WithLocalNormal(localNormal));
-        }
-    }
-
-    private bool ShouldUseExactTerrainConformOnLoad(float distanceToTargetSq)
-    {
-        if (!Application.isPlaying)
-        {
-            return true;
-        }
-
-        float exactConformRadius = Mathf.Max(0f, highDetailTerrainConformRadiusMeters);
-        return exactConformRadius <= 0f || distanceToTargetSq <= exactConformRadius * exactConformRadius;
-    }
-
-    private bool IsSeamRiskPlacement(Vector3 localPosition)
-    {
-        float seamRiskMargin = ResolveTerrainSeamRiskMarginMeters();
-        if (seamRiskMargin <= 0f)
-        {
-            return false;
-        }
-
-        float maxX = Mathf.Max(0f, terrainWidth);
-        float maxZ = Mathf.Max(0f, terrainLength);
-        return localPosition.x <= seamRiskMargin ||
-               localPosition.z <= seamRiskMargin ||
-               localPosition.x >= maxX - seamRiskMargin ||
-               localPosition.z >= maxZ - seamRiskMargin;
-    }
-
-    private float ResolveTerrainSeamRiskMarginMeters()
-    {
-        float terrainExtent = Mathf.Min(Mathf.Max(0f, terrainWidth), Mathf.Max(0f, terrainLength));
-        if (terrainExtent <= 0f)
-        {
-            return 0f;
-        }
-
-        return Mathf.Clamp(terrainExtent * 0.08f, 2f, 12f);
-    }
-
-    private VegetationDensityZone ResolveVegetationDensityZone(
-        float distanceToTargetSq,
-        TileObjectStreamingTier streamingTier,
-        bool treatAsTreeLikePlacement)
-    {
-        if (!Application.isPlaying)
-        {
-            return VegetationDensityZone.High;
-        }
-
-        float highRadius = Mathf.Max(0f, highDetailPlacementRadiusMeters);
-        float midRadius = Mathf.Max(highRadius, midDetailPlacementRadiusMeters);
-        float highRadiusSq = highRadius * highRadius;
-        float midRadiusSq = midRadius * midRadius;
-        if (distanceToTargetSq <= highRadiusSq)
-        {
-            return VegetationDensityZone.High;
-        }
-
-        if (distanceToTargetSq > midRadiusSq)
-        {
-            return VegetationDensityZone.Outer;
-        }
-
-        if (treatAsTreeLikePlacement)
-        {
-            return VegetationDensityZone.Mid;
-        }
-
-        return streamingTier == TileObjectStreamingTier.Ground ||
-               streamingTier == TileObjectStreamingTier.Clutter
-            ? VegetationDensityZone.Outer
-            : VegetationDensityZone.Mid;
-    }
-
     private static bool ShouldKeepPlacementForDensityZone(
         TileObjectPlacement placement,
         VegetationDensityZone densityZone,
@@ -590,18 +898,18 @@ public sealed partial class TileLoader : MonoBehaviour
         float keepProbability = isTreeCoupledSurfacePlacement
             ? densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f
             : placement.Definition.StreamingTier switch
-        {
-            TileObjectStreamingTier.Canopy => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
-            TileObjectStreamingTier.Large => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
-            TileObjectStreamingTier.Clutter => densityZone == VegetationDensityZone.Mid ? 0.35f : 0.1f,
-            TileObjectStreamingTier.Ground => densityZone == VegetationDensityZone.Mid ? 0.15f : 0f,
-            _ => 1f,
-        };
+            {
+                TileObjectStreamingTier.Canopy => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
+                TileObjectStreamingTier.Large => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
+                TileObjectStreamingTier.Clutter => densityZone == VegetationDensityZone.Mid ? 0.35f : 0.1f,
+                TileObjectStreamingTier.Ground => densityZone == VegetationDensityZone.Mid ? 0.15f : 0f,
+                _ => 1f,
+            };
 
         return StableHashToUnitInterval(stableHash) <= keepProbability;
     }
 
-    private static void RecordVegetationSampleCounts(
+    internal static void RecordVegetationSampleCounts(
         GeneratedTerrainBatchState? batchState,
         VegetationTileStreamingStats? tileStats,
         int heightmapSamples,
@@ -626,90 +934,6 @@ public sealed partial class TileLoader : MonoBehaviour
         }
     }
 
-    private void RecordPlacementPhaseTiming(
-        GeneratedTerrainBatchState? batchState,
-        VegetationTileStreamingStats? tileStats,
-        double elapsedMilliseconds,
-        VegetationPlacementPhase placementPhase,
-        VegetationWorkItem? workItem = null)
-    {
-        if (elapsedMilliseconds <= 0d)
-        {
-            return;
-        }
-
-        tileStats?.RecordPlacementCpu(elapsedMilliseconds);
-        tileStats?.RecordPlacementPhase(elapsedMilliseconds, placementPhase);
-        workItem?.RecordPlacementPhase(elapsedMilliseconds, placementPhase);
-        if (batchState == null)
-        {
-            return;
-        }
-
-        batchState.VegetationPlacementCpuMilliseconds += elapsedMilliseconds;
-        switch (placementPhase)
-        {
-            case VegetationPlacementPhase.PrefabResolve:
-                batchState.VegetationPrefabResolveMilliseconds += elapsedMilliseconds;
-                break;
-            case VegetationPlacementPhase.PrototypeResolve:
-                batchState.VegetationPrototypeResolveMilliseconds += elapsedMilliseconds;
-                break;
-            case VegetationPlacementPhase.PositionBuild:
-                batchState.VegetationPositionBuildMilliseconds += elapsedMilliseconds;
-                break;
-            case VegetationPlacementPhase.NormalBuild:
-                batchState.VegetationNormalBuildMilliseconds += elapsedMilliseconds;
-                break;
-            case VegetationPlacementPhase.RendererFinalize:
-                batchState.VegetationRendererFinalizeMilliseconds += elapsedMilliseconds;
-                break;
-        }
-    }
-
-    private VegetationPriorityBucket DeterminePriorityBucket(
-        bool isCenterTile,
-        bool nearPlayerPriority,
-        TileObjectStreamingTier streamingTier,
-        bool isTreeCoupledSurfacePlacement)
-    {
-        if (isTreeCoupledSurfacePlacement)
-        {
-            return isCenterTile || nearPlayerPriority
-                ? VegetationPriorityBucket.CenterCanopyAndLarge
-                : VegetationPriorityBucket.OuterCanopyAndLarge;
-        }
-
-        bool treatAsCenterPriority = streamingTier == TileObjectStreamingTier.Canopy ||
-                                     streamingTier == TileObjectStreamingTier.Large
-            ? isCenterTile || nearPlayerPriority
-            : nearPlayerPriority;
-        if (streamingTier == TileObjectStreamingTier.Ground)
-        {
-            return treatAsCenterPriority
-                ? VegetationPriorityBucket.CenterClutterAndGround
-                : VegetationPriorityBucket.OuterGroundAndDebris;
-        }
-
-        if (streamingTier == TileObjectStreamingTier.Clutter)
-        {
-            if (!centerTileOnlyNonTreeBudgetFirst)
-            {
-                return treatAsCenterPriority
-                    ? VegetationPriorityBucket.CenterClutterAndGround
-                    : VegetationPriorityBucket.OuterClutter;
-            }
-
-            return treatAsCenterPriority
-                ? VegetationPriorityBucket.CenterClutterAndGround
-                : VegetationPriorityBucket.OuterClutter;
-        }
-
-        return treatAsCenterPriority
-            ? VegetationPriorityBucket.CenterCanopyAndLarge
-            : VegetationPriorityBucket.OuterCanopyAndLarge;
-    }
-
     private static bool ShouldForceInstancingOnlyForPreparedPlacement(
         bool isCenterTile,
         bool nearPlayerPriority,
@@ -725,50 +949,20 @@ public sealed partial class TileLoader : MonoBehaviour
                (streamingTier == TileObjectStreamingTier.Clutter || streamingTier == TileObjectStreamingTier.Ground);
     }
 
-    private Vector3? ResolveVegetationStreamingTargetWorldPosition()
+    private static bool IsPlayerCentricSurfaceTier(TileObjectStreamingTier streamingTier)
     {
-        if (!Application.isPlaying)
-        {
-            return null;
-        }
-
-        Transform? target = ResolveVegetationStreamingTarget();
-        return target != null ? target.position : null;
+        return streamingTier == TileObjectStreamingTier.Clutter ||
+               streamingTier == TileObjectStreamingTier.Ground;
     }
 
     private static Transform? ResolveVegetationStreamingTarget()
     {
-        if (TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
+        if (TileLoaderTreeOptimizer.TryFindSceneTransformWithTag("Player", out Transform? taggedPlayerTransform))
         {
             return taggedPlayerTransform;
         }
 
         return Camera.main != null ? Camera.main.transform : null;
-    }
-
-    private static ulong ComputeStablePlacementHash(GeneratedTerrainRequest request, TileObjectPlacement placement)
-    {
-        ulong hash = 1469598103934665603UL;
-        AppendHash(ref hash, unchecked((ulong)request.UnityTileX));
-        AppendHash(ref hash, unchecked((ulong)request.UnityTileY));
-        AppendHash(ref hash, unchecked((ulong)placement.Definition.NumericId));
-        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.X, 4))));
-        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.Y, 4))));
-        AppendHash(ref hash, unchecked((ulong)placement.PlacementType));
-        AppendHash(ref hash, unchecked((ulong)(placement.PlacementTargetObjectId ?? 0)));
-        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.PlacementMaxDistance ?? 0d, 4))));
-        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.PlacementBias ?? 0d, 4))));
-
-        string? rawPath = placement.PrefabPath ?? placement.Definition.PrefabPath;
-        if (!string.IsNullOrWhiteSpace(rawPath))
-        {
-            for (int i = 0; i < rawPath.Length; i++)
-            {
-                AppendHash(ref hash, rawPath[i]);
-            }
-        }
-
-        return hash;
     }
 
     private static void AppendHash(ref ulong hash, ulong value)
@@ -780,23 +974,6 @@ public sealed partial class TileLoader : MonoBehaviour
     {
         return (stableHash & 0x00FFFFFFUL) / 16777215.0;
     }
+}
 
-    internal bool IsTreeCoupledSurfacePlacementInternal(TileObjectPlacement placement)
-        => IsTreeCoupledSurfacePlacement(placement);
-
-    private static bool IsTreeCoupledSurfacePlacement(TileObjectPlacement placement)
-    {
-        if (placement.PlacementType != VegetationPlacementType.Near ||
-            !IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier) ||
-            !placement.PlacementTargetObjectId.HasValue ||
-            !TileObjectRegistry.TryGet(placement.PlacementTargetObjectId.Value, out TileObjectDefinition targetDefinition))
-        {
-            return false;
-        }
-
-        return string.Equals(
-            targetDefinition.VegetationCategory,
-            "tree",
-            StringComparison.OrdinalIgnoreCase);
-    }
 }

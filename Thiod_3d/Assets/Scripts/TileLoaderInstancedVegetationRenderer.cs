@@ -12,6 +12,9 @@ using Pinwheel.Griffin;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 [Serializable]
 public sealed class TileLoaderInstancedVegetationRenderSource
 {
@@ -172,20 +175,20 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
     private Transform? _promotedContainer;
     private Coroutine? _runtimeBuildCoroutine;
     private float _prototypeInitBudgetMsPerFrame;
-    private TileLoader? _budgetOwner;
+    private IInstancedVegetationRuntimeBudgetOwner? _budgetOwner;
     private int _nextInteractionPlacementIndex;
 
     public bool IsPrototypeRuntimeReady { get; private set; }
     public double LastPrototypeInitializationMilliseconds { get; private set; }
     public double LastInitializationCpuMilliseconds { get; private set; }
 
-    public void Initialize(
+    internal void Initialize(
         IReadOnlyList<TileLoaderInstancedVegetationPrototype> prototypes,
         IReadOnlyList<TileLoaderInstancedVegetationPlacement> placements,
         bool interactive,
         float interactionRadiusMeters,
         float interactionHysteresisMeters,
-        TileLoader? budgetOwner,
+        IInstancedVegetationRuntimeBudgetOwner? budgetOwner,
         float prototypeInitBudgetMsPerFrame)
     {
         ReleaseRuntimeData();
@@ -1453,4 +1456,6 @@ public sealed class TileLoaderInstancedDecalProjectorStream : MonoBehaviour
             DestroyImmediate(instance);
         }
     }
+}
+
 }

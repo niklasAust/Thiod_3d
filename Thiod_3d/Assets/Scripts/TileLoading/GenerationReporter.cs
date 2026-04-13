@@ -6,6 +6,9 @@ using UnityEngine;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal sealed class GenerationReporter
 {
     private readonly TileLoader owner;
@@ -296,4 +299,6 @@ internal sealed class GenerationReporter
             ? $"firstVisibleWallMs={tileStats.FirstVisibleMilliseconds.ToString("F1", CultureInfo.InvariantCulture)}, "
             : string.Empty;
     }
+}
+
 }

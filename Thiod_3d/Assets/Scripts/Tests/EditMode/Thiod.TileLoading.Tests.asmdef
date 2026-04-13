@@ -1,0 +1,12 @@
+{
+  "name": "Thiod.TileLoading.Tests",
+  "references": [
+    "Thiod.TileLoading.Runtime"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ]
+}

@@ -4,6 +4,9 @@ using WorldGen;
 
 #nullable enable
 
+namespace Thiod.TileLoading.Runtime
+{
+
 internal static class TileLoaderTerrainMathUtility
 {
     public static float[,] BuildNormalizedHeights(double[,] sourceHeightmap, double maxTileHeightUnits)
@@ -165,4 +168,6 @@ internal static class TileLoaderTerrainMathUtility
     {
         return a + (b - a) * t;
     }
+}
+
 }
