@@ -980,8 +980,8 @@ public sealed partial class TileLoader : MonoBehaviour
             return;
         }
 
-        const float interactionBudgetMilliseconds = 2f;
-        const int maxChildSnapGroupsPerFrame = 2;
+        const float interactionBudgetMilliseconds = 4f;
+        const int maxChildSnapGroupsPerFrame = 4;
         float localBudgetMilliseconds = Math.Min(Math.Max(0.1f, runtimeGlobalBudgetMsPerFrame), interactionBudgetMilliseconds);
         var frameStopwatch = Stopwatch.StartNew();
         RestartRuntimeChunkStopwatch(frameStopwatch);
@@ -3202,6 +3202,10 @@ public sealed partial class TileLoader : MonoBehaviour
             renderer = buildState.VegetationContainer.gameObject.AddComponent<TileLoaderInstancedVegetationRenderer>();
         }
 
+        TileLoaderInstancedDecalProjectorStream decalProjectorStream =
+            buildState.VegetationContainer.GetComponent<TileLoaderInstancedDecalProjectorStream>() ??
+            buildState.VegetationContainer.gameObject.AddComponent<TileLoaderInstancedDecalProjectorStream>();
+
         renderer.Initialize(
             buildState.Prototypes,
             buildState.Placements,
@@ -3210,6 +3214,7 @@ public sealed partial class TileLoader : MonoBehaviour
             vegetationInteractionHysteresisMeters,
             this,
             prototypeInitBudgetMsPerFrame);
+        decalProjectorStream.Initialize(buildState.Prototypes, buildState.Placements);
         buildState.LastFinalizedPlacementCount = buildState.Placements.Count;
         if (buildState.BatchState != null)
         {
@@ -3590,6 +3595,7 @@ public sealed partial class TileLoader : MonoBehaviour
 
         Renderer[] candidateRenderers = ResolveInstancedPrototypeRenderers(prefab, isTreeObject);
         var renderSources = new List<TileLoaderInstancedVegetationRenderSource>();
+        var decalSources = new List<TileLoaderInstancedDecalProjectorSource>();
         Matrix4x4 rootWorldToLocal = prefab.transform.worldToLocalMatrix;
         for (int rendererIndex = 0; rendererIndex < candidateRenderers.Length; rendererIndex++)
         {
@@ -3627,6 +3633,30 @@ public sealed partial class TileLoader : MonoBehaviour
             }
         }
 
+        if (isTreeObject)
+        {
+            DecalProjector[] decalProjectors = prefab.GetComponentsInChildren<DecalProjector>(true);
+            for (int projectorIndex = 0; projectorIndex < decalProjectors.Length; projectorIndex++)
+            {
+                DecalProjector decalProjector = decalProjectors[projectorIndex];
+                if (decalProjector == null ||
+                    !decalProjector.enabled ||
+                    decalProjector.material == null ||
+                    decalProjector.gameObject == null ||
+                    !decalProjector.gameObject.activeSelf)
+                {
+                    continue;
+                }
+
+                Matrix4x4 localMatrix = rootWorldToLocal * decalProjector.transform.localToWorldMatrix;
+                decalSources.Add(new TileLoaderInstancedDecalProjectorSource(
+                    decalProjector.gameObject,
+                    decalProjector.material,
+                    localMatrix,
+                    decalProjector.drawDistance));
+            }
+        }
+
         TileLoaderInstancedVegetationPrototype? prototype = renderSources.Count == 0
             ? null
             : new TileLoaderInstancedVegetationPrototype(
@@ -3635,7 +3665,8 @@ public sealed partial class TileLoader : MonoBehaviour
                 isTreeObject,
                 supportsPromotion,
                 maxRenderDistanceMeters,
-                renderSources);
+                renderSources,
+                decalSources);
         vegetationPrototypeCache[cacheKey] = prototype;
         return prototype;
     }

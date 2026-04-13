@@ -203,7 +203,7 @@ internal sealed class PlayerCentricSurfaceController
             bool hasSurfacePlacements = false;
             for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
             {
-                if (IsPlayerCentricSurfaceTier(placedObjects[placementIndex].Definition.StreamingTier))
+                if (ShouldRouteToPlayerCentricSurface(placedObjects[placementIndex]))
                 {
                     hasSurfacePlacements = true;
                     break;
@@ -293,7 +293,7 @@ internal sealed class PlayerCentricSurfaceController
             bool hasSurfacePlacements = false;
             for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
             {
-                if (IsPlayerCentricSurfaceTier(placedObjects[placementIndex].Definition.StreamingTier))
+                if (ShouldRouteToPlayerCentricSurface(placedObjects[placementIndex]))
                 {
                     hasSurfacePlacements = true;
                     break;
@@ -653,7 +653,7 @@ internal sealed class PlayerCentricSurfaceController
                     continue;
                 }
 
-                PlayerCentricSurfaceCellKey cellKey = ResolveCellKey(preparedPlacement.Geometry.WorldPosition);
+                PlayerCentricSurfaceCellKey cellKey = ResolveCellKey(preparedPlacement.Geometry.WorldPosition, tileCoordinate);
                 if (!stagedCellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? cellSource))
                 {
                     cellSource = new PlayerCentricSurfaceCellSource(cellKey, tileCoordinate, terrain);
@@ -739,8 +739,13 @@ internal sealed class PlayerCentricSurfaceController
         for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
         {
             TileObjectPlacement placement = placedObjects[placementIndex];
-            if (!IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier))
+            if (!ShouldRouteToPlayerCentricSurface(placement))
             {
+                if (owner.IsTreeCoupledSurfacePlacementInternal(placement))
+                {
+                    batchState.PlayerCentricSurfaceTreeCoupledPlacementExcludedCount++;
+                }
+
                 continue;
             }
 
@@ -889,7 +894,7 @@ internal sealed class PlayerCentricSurfaceController
                 continue;
             }
 
-            PlayerCentricSurfaceCellKey cellKey = ResolveCellKey(preparedPlacement.Geometry.WorldPosition);
+            PlayerCentricSurfaceCellKey cellKey = ResolveCellKey(preparedPlacement.Geometry.WorldPosition, tileCoordinate);
             if (!cellSources.TryGetValue(cellKey, out PlayerCentricSurfaceCellSource? cellSource))
             {
                 cellSource = new PlayerCentricSurfaceCellSource(cellKey, tileCoordinate, terrain);
@@ -939,9 +944,13 @@ internal sealed class PlayerCentricSurfaceController
         for (int placementIndex = 0; placementIndex < placedObjects.Count; placementIndex++)
         {
             TileObjectPlacement placement = placedObjects[placementIndex];
-            TileObjectStreamingTier streamingTier = placement.Definition.StreamingTier;
-            if (!IsPlayerCentricSurfaceTier(streamingTier))
+            if (!ShouldRouteToPlayerCentricSurface(placement))
             {
+                if (owner.IsTreeCoupledSurfacePlacementInternal(placement))
+                {
+                    batchState.PlayerCentricSurfaceTreeCoupledPlacementExcludedCount++;
+                }
+
                 continue;
             }
 
@@ -1051,17 +1060,24 @@ internal sealed class PlayerCentricSurfaceController
                streamingTier == TileObjectStreamingTier.Ground;
     }
 
+    private bool ShouldRouteToPlayerCentricSurface(TileObjectPlacement placement)
+    {
+        return IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier) &&
+               !owner.IsTreeCoupledSurfacePlacementInternal(placement);
+    }
+
     private string ResolveCacheSignature(string batchCacheSignature)
     {
         return $"{batchCacheSignature}|surface-v{owner.PlayerCentricSurfaceCacheVersionInternal.ToString(CultureInfo.InvariantCulture)}";
     }
 
-    private PlayerCentricSurfaceCellKey ResolveCellKey(Vector3 worldPosition)
+    private PlayerCentricSurfaceCellKey ResolveCellKey(Vector3 worldPosition, Vector2Int ownerTileCoordinate)
     {
         float cellSizeMeters = Mathf.Max(1f, owner.PlayerCentricSurfaceCellSizeMetersInternal);
         return new PlayerCentricSurfaceCellKey(
             Mathf.FloorToInt(worldPosition.x / cellSizeMeters),
-            Mathf.FloorToInt(worldPosition.z / cellSizeMeters));
+            Mathf.FloorToInt(worldPosition.z / cellSizeMeters),
+            ownerTileCoordinate);
     }
 
     private string GetSurfaceRootName()

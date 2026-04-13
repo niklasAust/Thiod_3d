@@ -287,6 +287,7 @@ internal sealed class VegetationWorkItem
     public int LegacyPlacementCount { get; private set; }
     public int MissingPrefabCount { get; private set; }
     public int ForcedInstancingOnlyCount { get; private set; }
+    public int TreeCoupledSurfacePlacementCount { get; private set; }
     public int ExactTerrainConformPlacementCount { get; private set; }
     public int ApproximatePlacementCount { get; private set; }
     public int NewPrototypeCount { get; set; }
@@ -313,6 +314,11 @@ internal sealed class VegetationWorkItem
     public void RecordMissingPrefab()
     {
         MissingPrefabCount++;
+    }
+
+    public void RecordTreeCoupledSurfacePlacement()
+    {
+        TreeCoupledSurfacePlacementCount++;
     }
 
     public void RecordPlacementTransformMode(bool usedExactTerrainConform)
@@ -433,26 +439,30 @@ internal readonly struct PreparedVegetationPlacement
 
 internal readonly struct PlayerCentricSurfaceCellKey : IEquatable<PlayerCentricSurfaceCellKey>
 {
-    public PlayerCentricSurfaceCellKey(int x, int y)
+    public PlayerCentricSurfaceCellKey(int x, int y, Vector2Int ownerTileCoordinate)
     {
         X = x;
         Y = y;
+        OwnerTileCoordinate = ownerTileCoordinate;
     }
 
     public int X { get; }
     public int Y { get; }
+    public Vector2Int OwnerTileCoordinate { get; }
 
     public bool Equals(PlayerCentricSurfaceCellKey other)
-        => X == other.X && Y == other.Y;
+        => X == other.X &&
+           Y == other.Y &&
+           OwnerTileCoordinate == other.OwnerTileCoordinate;
 
     public override bool Equals(object? obj)
         => obj is PlayerCentricSurfaceCellKey other && Equals(other);
 
     public override int GetHashCode()
-        => HashCode.Combine(X, Y);
+        => HashCode.Combine(X, Y, OwnerTileCoordinate);
 
     public override string ToString()
-        => $"cell({X},{Y})";
+        => $"cell({X},{Y})@tile({OwnerTileCoordinate.x},{OwnerTileCoordinate.y})";
 }
 
 internal sealed class PlayerCentricSurfaceCellSource
@@ -529,6 +539,7 @@ internal sealed class VegetationTileStreamingStats
     public int LegacyPlacementCount { get; private set; }
     public int MissingPrefabCount { get; private set; }
     public int ForcedInstancingOnlyCount { get; private set; }
+    public int TreeCoupledSurfacePlacementCount { get; private set; }
     public int ExactTerrainConformPlacementCount { get; private set; }
     public int ApproximatePlacementCount { get; private set; }
     public int DeferredRendererFinalizeCount { get; private set; }
@@ -649,6 +660,11 @@ internal sealed class VegetationTileStreamingStats
     public void RecordForcedInstancingOnly()
     {
         ForcedInstancingOnlyCount++;
+    }
+
+    public void RecordTreeCoupledSurfacePlacement()
+    {
+        TreeCoupledSurfacePlacementCount++;
     }
 
     public void RecordPlacementTransformMode(bool usedExactTerrainConform)
@@ -871,6 +887,7 @@ internal sealed class GeneratedTerrainBatchState
     public int VegetationPrototypeCacheMissCount { get; set; }
     public int VegetationForcedInstancingOnlyCount { get; set; }
     public int VegetationMissingPrefabCount { get; set; }
+    public int VegetationTreeCoupledSurfacePlacementCount { get; set; }
     public int VegetationRendererInitializationCount { get; set; }
     public double VegetationPrototypeInitializationMilliseconds { get; set; }
     public double VegetationQueuePrepCpuMilliseconds { get; set; }
@@ -891,6 +908,7 @@ internal sealed class GeneratedTerrainBatchState
     public int PlayerCentricSurfaceActivatedCellCount { get; set; }
     public int PlayerCentricSurfaceDeactivatedCellCount { get; set; }
     public int PlayerCentricSurfaceMissingPrefabCount { get; set; }
+    public int PlayerCentricSurfaceTreeCoupledPlacementExcludedCount { get; set; }
     public double PlayerCentricSurfaceSourceBuildCpuMilliseconds { get; set; }
     public double PlayerCentricSurfaceFirstVisibleMilliseconds { get; set; }
     public double PlayerCentricSurfaceFullSettledMilliseconds { get; set; }

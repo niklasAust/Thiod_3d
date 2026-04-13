@@ -35,7 +35,10 @@ public sealed partial class TileLoader : MonoBehaviour
         {
             TileObjectPlacement placement = placedObjects[placementIndex];
             TileObjectStreamingTier streamingTier = placement.Definition.StreamingTier;
-            if (ShouldUsePlayerCentricSurfaceVegetation() && IsPlayerCentricSurfaceTier(streamingTier))
+            bool isTreeCoupledSurfacePlacement = IsTreeCoupledSurfacePlacement(placement);
+            if (ShouldUsePlayerCentricSurfaceVegetation() &&
+                IsPlayerCentricSurfaceTier(streamingTier) &&
+                !isTreeCoupledSurfacePlacement)
             {
                 continue;
             }
@@ -88,7 +91,7 @@ public sealed partial class TileLoader : MonoBehaviour
                 continue;
             }
 
-            if (!ShouldKeepPlacementForDensityZone(placement, geometry.DensityZone, stableHash))
+            if (!ShouldKeepPlacementForDensityZone(placement, geometry.DensityZone, stableHash, isTreeCoupledSurfacePlacement))
             {
                 hashPolicyMilliseconds += phaseStopwatch.Elapsed.TotalMilliseconds;
                 tileStats.RecordSkipped(categoryName);
@@ -102,8 +105,8 @@ public sealed partial class TileLoader : MonoBehaviour
                 placement,
                 stableHash,
                 isCenterTile,
-                DeterminePriorityBucket(isCenterTile, nearPlayerPriority, streamingTier),
-                ShouldForceInstancingOnlyForPreparedPlacement(isCenterTile, nearPlayerPriority, streamingTier),
+                DeterminePriorityBucket(isCenterTile, nearPlayerPriority, streamingTier, isTreeCoupledSurfacePlacement),
+                ShouldForceInstancingOnlyForPreparedPlacement(isCenterTile, nearPlayerPriority, streamingTier, isTreeCoupledSurfacePlacement),
                 geometry);
 
             int? maxPlacementsPerTile = placement.Definition.MaxPlacementsPerTile;
@@ -121,6 +124,11 @@ public sealed partial class TileLoader : MonoBehaviour
 
             tileStats.RecordKept(categoryName);
             batchState.VegetationKeptPlacementCount++;
+            if (isTreeCoupledSurfacePlacement)
+            {
+                tileStats.RecordTreeCoupledSurfacePlacement();
+                batchState.VegetationTreeCoupledSurfacePlacementCount++;
+            }
             preparedPlacements.Add(preparedPlacement);
         }
 
@@ -143,6 +151,11 @@ public sealed partial class TileLoader : MonoBehaviour
                 {
                     tileStats.RecordKept(categoryName);
                     batchState.VegetationKeptPlacementCount++;
+                    if (IsTreeCoupledSurfacePlacement(preparedPlacement.Placement))
+                    {
+                        tileStats.RecordTreeCoupledSurfacePlacement();
+                        batchState.VegetationTreeCoupledSurfacePlacementCount++;
+                    }
                     preparedPlacements.Add(preparedPlacement);
                     continue;
                 }
@@ -402,6 +415,7 @@ public sealed partial class TileLoader : MonoBehaviour
         out PreparedPlacementGeometry geometry)
     {
         geometry = default;
+        bool treatAsTreeLikePlacement = isTreePlacement || IsTreeCoupledSurfacePlacement(placement);
         double[,] heightmap = request.Layers.Heightmap;
         Vector3 localPosition = GetTerrainLocalPointFromHeightmapApprox(
             heightmap,
@@ -409,7 +423,7 @@ public sealed partial class TileLoader : MonoBehaviour
             placement.Y,
             batchState.NormalizationMinHeight,
             batchState.NormalizationMaxHeight,
-            isTreePlacement ? treeObjectVerticalOffset : surfaceObjectVerticalOffset);
+            treatAsTreeLikePlacement ? treeObjectVerticalOffset : surfaceObjectVerticalOffset);
         RecordVegetationSampleCounts(batchState, tileStats, 1, 0);
 
         Vector3 worldPosition = terrain.transform.TransformPoint(localPosition);
@@ -432,12 +446,12 @@ public sealed partial class TileLoader : MonoBehaviour
             }
 
             densityZone = enforceCurrentStreamingDistance
-                ? ResolveVegetationDensityZone(distanceToTargetSq, placement.Definition.StreamingTier)
+                ? ResolveVegetationDensityZone(distanceToTargetSq, placement.Definition.StreamingTier, treatAsTreeLikePlacement)
                 : VegetationDensityZone.High;
         }
 
         bool useExactTerrainConformOnLoad =
-            isTreePlacement ||
+            treatAsTreeLikePlacement ||
             ShouldUseExactTerrainConformOnLoad(distanceToTargetSq) ||
             IsSeamRiskPlacement(localPosition);
         bool useExactTerrainConformOnPromotion =
@@ -529,7 +543,8 @@ public sealed partial class TileLoader : MonoBehaviour
 
     private VegetationDensityZone ResolveVegetationDensityZone(
         float distanceToTargetSq,
-        TileObjectStreamingTier streamingTier)
+        TileObjectStreamingTier streamingTier,
+        bool treatAsTreeLikePlacement)
     {
         if (!Application.isPlaying)
         {
@@ -550,6 +565,11 @@ public sealed partial class TileLoader : MonoBehaviour
             return VegetationDensityZone.Outer;
         }
 
+        if (treatAsTreeLikePlacement)
+        {
+            return VegetationDensityZone.Mid;
+        }
+
         return streamingTier == TileObjectStreamingTier.Ground ||
                streamingTier == TileObjectStreamingTier.Clutter
             ? VegetationDensityZone.Outer
@@ -559,14 +579,17 @@ public sealed partial class TileLoader : MonoBehaviour
     private static bool ShouldKeepPlacementForDensityZone(
         TileObjectPlacement placement,
         VegetationDensityZone densityZone,
-        ulong stableHash)
+        ulong stableHash,
+        bool isTreeCoupledSurfacePlacement)
     {
         if (densityZone == VegetationDensityZone.High)
         {
             return true;
         }
 
-        float keepProbability = placement.Definition.StreamingTier switch
+        float keepProbability = isTreeCoupledSurfacePlacement
+            ? densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f
+            : placement.Definition.StreamingTier switch
         {
             TileObjectStreamingTier.Canopy => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
             TileObjectStreamingTier.Large => densityZone == VegetationDensityZone.Mid ? 0.85f : 0.6f,
@@ -647,8 +670,16 @@ public sealed partial class TileLoader : MonoBehaviour
     private VegetationPriorityBucket DeterminePriorityBucket(
         bool isCenterTile,
         bool nearPlayerPriority,
-        TileObjectStreamingTier streamingTier)
+        TileObjectStreamingTier streamingTier,
+        bool isTreeCoupledSurfacePlacement)
     {
+        if (isTreeCoupledSurfacePlacement)
+        {
+            return isCenterTile || nearPlayerPriority
+                ? VegetationPriorityBucket.CenterCanopyAndLarge
+                : VegetationPriorityBucket.OuterCanopyAndLarge;
+        }
+
         bool treatAsCenterPriority = streamingTier == TileObjectStreamingTier.Canopy ||
                                      streamingTier == TileObjectStreamingTier.Large
             ? isCenterTile || nearPlayerPriority
@@ -682,8 +713,14 @@ public sealed partial class TileLoader : MonoBehaviour
     private static bool ShouldForceInstancingOnlyForPreparedPlacement(
         bool isCenterTile,
         bool nearPlayerPriority,
-        TileObjectStreamingTier streamingTier)
+        TileObjectStreamingTier streamingTier,
+        bool isTreeCoupledSurfacePlacement)
     {
+        if (isTreeCoupledSurfacePlacement)
+        {
+            return false;
+        }
+
         return !nearPlayerPriority &&
                (streamingTier == TileObjectStreamingTier.Clutter || streamingTier == TileObjectStreamingTier.Ground);
     }
@@ -717,6 +754,10 @@ public sealed partial class TileLoader : MonoBehaviour
         AppendHash(ref hash, unchecked((ulong)placement.Definition.NumericId));
         AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.X, 4))));
         AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.Y, 4))));
+        AppendHash(ref hash, unchecked((ulong)placement.PlacementType));
+        AppendHash(ref hash, unchecked((ulong)(placement.PlacementTargetObjectId ?? 0)));
+        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.PlacementMaxDistance ?? 0d, 4))));
+        AppendHash(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Math.Round(placement.PlacementBias ?? 0d, 4))));
 
         string? rawPath = placement.PrefabPath ?? placement.Definition.PrefabPath;
         if (!string.IsNullOrWhiteSpace(rawPath))
@@ -738,5 +779,24 @@ public sealed partial class TileLoader : MonoBehaviour
     private static double StableHashToUnitInterval(ulong stableHash)
     {
         return (stableHash & 0x00FFFFFFUL) / 16777215.0;
+    }
+
+    internal bool IsTreeCoupledSurfacePlacementInternal(TileObjectPlacement placement)
+        => IsTreeCoupledSurfacePlacement(placement);
+
+    private static bool IsTreeCoupledSurfacePlacement(TileObjectPlacement placement)
+    {
+        if (placement.PlacementType != VegetationPlacementType.Near ||
+            !IsPlayerCentricSurfaceTier(placement.Definition.StreamingTier) ||
+            !placement.PlacementTargetObjectId.HasValue ||
+            !TileObjectRegistry.TryGet(placement.PlacementTargetObjectId.Value, out TileObjectDefinition targetDefinition))
+        {
+            return false;
+        }
+
+        return string.Equals(
+            targetDefinition.VegetationCategory,
+            "tree",
+            StringComparison.OrdinalIgnoreCase);
     }
 }

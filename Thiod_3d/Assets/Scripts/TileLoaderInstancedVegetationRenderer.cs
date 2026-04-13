@@ -5,6 +5,7 @@ using Stopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
 using Unity.Profiling;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 #if GRIFFIN
 using Pinwheel.Griffin;
 #endif
@@ -50,7 +51,8 @@ public sealed class TileLoaderInstancedVegetationPrototype
         bool isTree,
         bool supportsPromotion,
         float maxRenderDistanceMeters,
-        IReadOnlyList<TileLoaderInstancedVegetationRenderSource> renderSources)
+        IReadOnlyList<TileLoaderInstancedVegetationRenderSource> renderSources,
+        IReadOnlyList<TileLoaderInstancedDecalProjectorSource> decalSources)
     {
         Key = key ?? throw new ArgumentNullException(nameof(key));
         Prefab = prefab;
@@ -58,6 +60,7 @@ public sealed class TileLoaderInstancedVegetationPrototype
         SupportsPromotion = supportsPromotion;
         MaxRenderDistanceMeters = maxRenderDistanceMeters;
         RenderSources = renderSources ?? throw new ArgumentNullException(nameof(renderSources));
+        DecalSources = decalSources ?? throw new ArgumentNullException(nameof(decalSources));
     }
 
     public string Key { get; }
@@ -66,7 +69,29 @@ public sealed class TileLoaderInstancedVegetationPrototype
     public bool SupportsPromotion { get; }
     public float MaxRenderDistanceMeters { get; }
     public IReadOnlyList<TileLoaderInstancedVegetationRenderSource> RenderSources { get; }
+    public IReadOnlyList<TileLoaderInstancedDecalProjectorSource> DecalSources { get; }
     public object? SharedRuntime { get; set; }
+}
+
+[Serializable]
+public sealed class TileLoaderInstancedDecalProjectorSource
+{
+    public TileLoaderInstancedDecalProjectorSource(
+        GameObject template,
+        Material material,
+        Matrix4x4 localMatrix,
+        float drawDistance)
+    {
+        Template = template ?? throw new ArgumentNullException(nameof(template));
+        Material = material ?? throw new ArgumentNullException(nameof(material));
+        LocalMatrix = localMatrix;
+        DrawDistance = drawDistance;
+    }
+
+    public GameObject Template { get; }
+    public Material Material { get; }
+    public Matrix4x4 LocalMatrix { get; }
+    public float DrawDistance { get; }
 }
 
 public readonly struct TileLoaderInstancedVegetationPlacement
@@ -123,9 +148,11 @@ public sealed class TileLoaderPromotedVegetationInstance : MonoBehaviour
 public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 {
     private const int MaxInstancesPerDrawCall = 1023;
-    private const float MinimumInteractionUpdateInterval = 0.2f;
+    private const float MinimumInteractionUpdateInterval = 0.05f;
     private const int MaxPendingChildSnapGroupsPerFrame = 1;
-    private const int MaxInteractionPlacementChecksPerUpdate = 128;
+    private const int MaxInteractionPlacementChecksPerUpdate = 512;
+    private const int MaxPromotionsPerInteractionStep = 8;
+    private const int MaxDemotionsPerInteractionStep = 2;
     private static readonly ProfilerMarker ScheduledInteractionMarker = new("TileLoader.VegetationRenderer.ScheduledInteraction");
     private static readonly ProfilerMarker PromotePlacementMarker = new("TileLoader.VegetationRenderer.PromotePlacement");
     private static readonly ProfilerMarker DemotePlacementMarker = new("TileLoader.VegetationRenderer.DemotePlacement");
@@ -182,9 +209,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         _interactionHysteresisMeters = Mathf.Max(0f, interactionHysteresisMeters);
         _budgetOwner = budgetOwner;
         _prototypeInitBudgetMsPerFrame = Mathf.Max(0.1f, prototypeInitBudgetMsPerFrame);
-        _nextInteractionUpdateTime = Application.isPlaying
-            ? Time.unscaledTime + ResolveInteractionUpdateOffsetSeconds()
-            : 0f;
+        _nextInteractionUpdateTime = 0f;
         _nextInteractionPlacementIndex = 0;
         LastPrototypeInitializationMilliseconds = 0d;
         LastInitializationCpuMilliseconds = 0d;
@@ -266,6 +291,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         float demoteDistance = _interactionRadiusMeters + _interactionHysteresisMeters;
         float demoteDistanceSq = demoteDistance * demoteDistance;
         int placementsToCheck = Mathf.Min(_placements.Length, MaxInteractionPlacementChecksPerUpdate);
+        int promotionsPerformed = 0;
+        int demotionsPerformed = 0;
 
         for (int checkedCount = 0; checkedCount < placementsToCheck; checkedCount++)
         {
@@ -289,6 +316,12 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             if (!state.IsPromoted && sqrDistance <= promoteDistanceSq)
             {
                 PromotePlacement(i);
+                promotionsPerformed++;
+                if (promotionsPerformed >= MaxPromotionsPerInteractionStep)
+                {
+                    break;
+                }
+
                 continue;
             }
 
@@ -306,6 +339,11 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
             }
 
             DemotePlacement(i);
+            demotionsPerformed++;
+            if (demotionsPerformed >= MaxDemotionsPerInteractionStep)
+            {
+                break;
+            }
         }
 
         _nextInteractionPlacementIndex = (_nextInteractionPlacementIndex + placementsToCheck) % _placements.Length;
@@ -317,8 +355,7 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         Application.isPlaying &&
         isActiveAndEnabled &&
         _interactive &&
-        _placements.Length > 0 &&
-        IsPrototypeRuntimeReady;
+        _placements.Length > 0;
 
     internal bool RunScheduledInteractionStep(
         Vector3 targetWorldPosition,
@@ -339,7 +376,8 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         {
             _nextInteractionUpdateTime = currentTime + MinimumInteractionUpdateInterval;
             bool didWork = false;
-            bool promotionOrDemotionPerformed = false;
+            int promotionsPerformed = 0;
+            int demotionsPerformed = 0;
             float promoteDistanceSq = _interactionRadiusMeters * _interactionRadiusMeters;
             float demoteDistance = _interactionRadiusMeters + _interactionHysteresisMeters;
             float demoteDistanceSq = demoteDistance * demoteDistance;
@@ -368,8 +406,13 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
                 {
                     PromotePlacement(i);
                     didWork = true;
-                    promotionOrDemotionPerformed = true;
-                    break;
+                    promotionsPerformed++;
+                    if (promotionsPerformed >= MaxPromotionsPerInteractionStep)
+                    {
+                        break;
+                    }
+
+                    continue;
                 }
 
                 if (!state.IsPromoted || sqrDistance < demoteDistanceSq)
@@ -387,12 +430,15 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
 
                 DemotePlacement(i);
                 didWork = true;
-                promotionOrDemotionPerformed = true;
-                break;
+                demotionsPerformed++;
+                if (demotionsPerformed >= MaxDemotionsPerInteractionStep)
+                {
+                    break;
+                }
             }
 
             _nextInteractionPlacementIndex = (_nextInteractionPlacementIndex + placementsToCheck) % _placements.Length;
-            if (!promotionOrDemotionPerformed)
+            if (!didWork)
             {
                 didWork |= ProcessPendingChildSnapGroups(ref remainingChildSnapGroups);
             }
@@ -709,6 +755,11 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         instance.transform.localPosition = placement.LocalPosition;
         instance.transform.localRotation = placement.LocalRotation;
         instance.transform.localScale = placement.LocalScale;
+        if (prototype.DecalSources.Count > 0)
+        {
+            DisablePromotedDecalProjectors(instance);
+        }
+
         if (placement.ConformToTerrainOnPromotion)
         {
             ConformPromotedPlacementToTerrain(instance.transform, placement, prototype.IsTree);
@@ -725,6 +776,24 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         marker.PlacementIndex = placementIndex;
         state.PromotedRoot = instance;
         state.IsPromoted = true;
+        }
+    }
+
+    private static void DisablePromotedDecalProjectors(GameObject instance)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        DecalProjector[] decalProjectors = instance.GetComponentsInChildren<DecalProjector>(true);
+        for (int i = 0; i < decalProjectors.Length; i++)
+        {
+            DecalProjector decalProjector = decalProjectors[i];
+            if (decalProjector != null)
+            {
+                decalProjector.enabled = false;
+            }
         }
     }
 
@@ -938,13 +1007,6 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
         _budgetOwner.UnregisterInstancedVegetationRendererInternal(this);
     }
 
-    private float ResolveInteractionUpdateOffsetSeconds()
-    {
-        int positiveId = Mathf.Abs(gameObject.GetInstanceID());
-        float normalized = (positiveId % 1024) / 1024f;
-        return normalized * MinimumInteractionUpdateInterval;
-    }
-
     private void QueueChildSnapGroups(GameObject instance)
     {
         if (instance == null)
@@ -1105,5 +1167,290 @@ public sealed class TileLoaderInstancedVegetationRenderer : MonoBehaviour
     {
         public bool IsPromoted;
         public GameObject? PromotedRoot;
+    }
+}
+
+[ExecuteAlways]
+[DisallowMultipleComponent]
+public sealed class TileLoaderInstancedDecalProjectorStream : MonoBehaviour
+{
+    private TileLoaderInstancedVegetationPrototype[] _prototypes = Array.Empty<TileLoaderInstancedVegetationPrototype>();
+    private string[] _prototypeKeys = Array.Empty<string>();
+    private int _spawnedPlacementCount;
+    private readonly List<GameObject> _spawnedProjectors = new();
+    private readonly Dictionary<Material, Material> _runtimeMaterialCache = new();
+    private Transform? _decalRoot;
+
+    public double LastInitializationCpuMilliseconds { get; private set; }
+
+    public void Initialize(
+        IReadOnlyList<TileLoaderInstancedVegetationPrototype> prototypes,
+        IReadOnlyList<TileLoaderInstancedVegetationPlacement> placements)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        bool canAppend = CanAppend(prototypes, placements);
+        if (!canAppend)
+        {
+            ReleaseRuntimeData();
+            CachePrototypes(prototypes);
+            AppendPlacementProjectors(placements, 0);
+        }
+        else
+        {
+            CachePrototypes(prototypes);
+            AppendPlacementProjectors(placements, _spawnedPlacementCount);
+        }
+
+        _spawnedPlacementCount = placements.Count;
+        stopwatch.Stop();
+        LastInitializationCpuMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
+    }
+
+    private void OnDestroy()
+    {
+        ReleaseRuntimeData();
+    }
+
+    private bool CanAppend(
+        IReadOnlyList<TileLoaderInstancedVegetationPrototype> prototypes,
+        IReadOnlyList<TileLoaderInstancedVegetationPlacement> placements)
+    {
+        if (_spawnedPlacementCount == 0 && _spawnedProjectors.Count == 0 && _prototypeKeys.Length == 0)
+        {
+            return false;
+        }
+
+        if (placements.Count < _spawnedPlacementCount || prototypes.Count < _prototypeKeys.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < _prototypeKeys.Length; i++)
+        {
+            if (!string.Equals(_prototypeKeys[i], prototypes[i].Key, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void CachePrototypes(IReadOnlyList<TileLoaderInstancedVegetationPrototype> prototypes)
+    {
+        _prototypes = new TileLoaderInstancedVegetationPrototype[prototypes.Count];
+        _prototypeKeys = new string[prototypes.Count];
+        for (int i = 0; i < prototypes.Count; i++)
+        {
+            TileLoaderInstancedVegetationPrototype prototype = prototypes[i];
+            _prototypes[i] = prototype;
+            _prototypeKeys[i] = prototype?.Key ?? string.Empty;
+        }
+    }
+
+    private void AppendPlacementProjectors(
+        IReadOnlyList<TileLoaderInstancedVegetationPlacement> placements,
+        int startPlacementIndex)
+    {
+        if (placements.Count == 0 || _prototypes.Length == 0)
+        {
+            return;
+        }
+
+        Transform decalRoot = GetOrCreateDecalRoot();
+        for (int placementIndex = Math.Max(0, startPlacementIndex); placementIndex < placements.Count; placementIndex++)
+        {
+            TileLoaderInstancedVegetationPlacement placement = placements[placementIndex];
+            if ((uint)placement.PrototypeIndex >= (uint)_prototypes.Length)
+            {
+                continue;
+            }
+
+            TileLoaderInstancedVegetationPrototype prototype = _prototypes[placement.PrototypeIndex];
+            if (prototype == null || !prototype.IsTree || prototype.DecalSources.Count == 0)
+            {
+                continue;
+            }
+
+            Matrix4x4 placementMatrix = Matrix4x4.TRS(
+                placement.LocalPosition,
+                placement.LocalRotation,
+                placement.LocalScale);
+            for (int sourceIndex = 0; sourceIndex < prototype.DecalSources.Count; sourceIndex++)
+            {
+                TileLoaderInstancedDecalProjectorSource source = prototype.DecalSources[sourceIndex];
+                if (source == null || source.Template == null || source.Material == null)
+                {
+                    continue;
+                }
+
+                GameObject instance = Instantiate(source.Template, decalRoot, false);
+                instance.name = source.Template.name;
+                Matrix4x4 projectorMatrix = placementMatrix * source.LocalMatrix;
+                ApplyLocalMatrix(instance.transform, projectorMatrix);
+
+                DecalProjector decalProjector = instance.GetComponent<DecalProjector>();
+                if (decalProjector == null)
+                {
+                    DestroyInstance(instance);
+                    continue;
+                }
+
+                Material runtimeMaterial = GetOrCreateRuntimeMaterial(source.Material);
+                if (runtimeMaterial != null)
+                {
+                    decalProjector.material = runtimeMaterial;
+                }
+
+                float clampedDrawDistance = ResolveDrawDistance(source.DrawDistance, prototype.MaxRenderDistanceMeters);
+                if (clampedDrawDistance > 0f)
+                {
+                    decalProjector.drawDistance = clampedDrawDistance;
+                }
+
+                _spawnedProjectors.Add(instance);
+            }
+        }
+    }
+
+    private Transform GetOrCreateDecalRoot()
+    {
+        if (_decalRoot != null)
+        {
+            return _decalRoot;
+        }
+
+        Transform existing = transform.Find("InstancedDecalProjectors");
+        if (existing != null)
+        {
+            _decalRoot = existing;
+            return _decalRoot;
+        }
+
+        var container = new GameObject("InstancedDecalProjectors");
+        container.transform.SetParent(transform, false);
+        container.transform.localPosition = Vector3.zero;
+        container.transform.localRotation = Quaternion.identity;
+        container.transform.localScale = Vector3.one;
+        _decalRoot = container.transform;
+        return _decalRoot;
+    }
+
+    private Material GetOrCreateRuntimeMaterial(Material sourceMaterial)
+    {
+        if (_runtimeMaterialCache.TryGetValue(sourceMaterial, out Material cachedMaterial) && cachedMaterial != null)
+        {
+            return cachedMaterial;
+        }
+
+        Material runtimeMaterial = sourceMaterial.enableInstancing
+            ? sourceMaterial
+            : new Material(sourceMaterial)
+            {
+                enableInstancing = true,
+                name = sourceMaterial.name + " (Decal Instanced)"
+            };
+        _runtimeMaterialCache[sourceMaterial] = runtimeMaterial;
+        return runtimeMaterial;
+    }
+
+    private static float ResolveDrawDistance(float sourceDrawDistance, float maxRenderDistanceMeters)
+    {
+        if (maxRenderDistanceMeters <= 0f)
+        {
+            return sourceDrawDistance;
+        }
+
+        if (sourceDrawDistance <= 0f)
+        {
+            return maxRenderDistanceMeters;
+        }
+
+        return Mathf.Min(sourceDrawDistance, maxRenderDistanceMeters);
+    }
+
+    private static void ApplyLocalMatrix(Transform target, Matrix4x4 matrix)
+    {
+        if (target == null)
+        {
+            return;
+        }
+
+        Vector3 position = matrix.GetColumn(3);
+        Vector3 scale = new(
+            matrix.GetColumn(0).magnitude,
+            matrix.GetColumn(1).magnitude,
+            matrix.GetColumn(2).magnitude);
+        Vector3 forward = matrix.GetColumn(2);
+        Vector3 up = matrix.GetColumn(1);
+        if (forward.sqrMagnitude <= 0.0001f)
+        {
+            forward = Vector3.forward;
+        }
+
+        if (up.sqrMagnitude <= 0.0001f)
+        {
+            up = Vector3.up;
+        }
+
+        target.localPosition = position;
+        target.localRotation = Quaternion.LookRotation(forward.normalized, up.normalized);
+        target.localScale = scale;
+    }
+
+    private void ReleaseRuntimeData()
+    {
+        for (int i = 0; i < _spawnedProjectors.Count; i++)
+        {
+            DestroyInstance(_spawnedProjectors[i]);
+        }
+
+        _spawnedProjectors.Clear();
+        foreach (KeyValuePair<Material, Material> entry in _runtimeMaterialCache)
+        {
+            Material runtimeMaterial = entry.Value;
+            if (runtimeMaterial == null || ReferenceEquals(runtimeMaterial, entry.Key))
+            {
+                continue;
+            }
+
+            if (Application.isPlaying)
+            {
+                Destroy(runtimeMaterial);
+            }
+            else
+            {
+                DestroyImmediate(runtimeMaterial);
+            }
+        }
+
+        _runtimeMaterialCache.Clear();
+        if (_decalRoot != null)
+        {
+            DestroyInstance(_decalRoot.gameObject);
+        }
+
+        _decalRoot = null;
+        _spawnedPlacementCount = 0;
+        _prototypes = Array.Empty<TileLoaderInstancedVegetationPrototype>();
+        _prototypeKeys = Array.Empty<string>();
+        LastInitializationCpuMilliseconds = 0d;
+    }
+
+    private static void DestroyInstance(GameObject instance)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        if (Application.isPlaying)
+        {
+            Destroy(instance);
+        }
+        else
+        {
+            DestroyImmediate(instance);
+        }
     }
 }
